@@ -40,16 +40,38 @@ def load_all(d):
     return t
 
 
-def load_all_links_safe(d):
-    """大目录用流式读取，避免一次性占满内存；返回 {key: tensor}。"""
-    import torch
+def list_keys(d):
+    """只读各分片的头部，返回 {key: shard_path}（不加载数据）。"""
     from safetensors import safe_open
-    t = {}
+    m = {}
     for f in sorted(glob.glob(os.path.join(d, "*.safetensors"))):
         with safe_open(f, framework="pt", device="cpu") as h:
             for k in h.keys():
-                t[k] = h.get_tensor(k)
-    return t
+                m[k] = f
+    return m
+
+
+def load_keys(d, keep_fn=None, skip_fn=None):
+    """按需读取：只加载满足 keep_fn / 不满足 skip_fn 的张量。
+
+    大模型（27B fp16 ≈ 55GB）整目录读入内存代价很高，
+    这里先只读头部拿到键名，再挑选需要的张量读取。
+    """
+    from safetensors import safe_open
+    keymap = list_keys(d)
+    need = {}
+    for k, f in keymap.items():
+        if keep_fn is not None and not keep_fn(k):
+            continue
+        if skip_fn is not None and skip_fn(k):
+            continue
+        need.setdefault(f, []).append(k)
+    out = {}
+    for f, ks in need.items():
+        with safe_open(f, framework="pt", device="cpu") as h:
+            for k in ks:
+                out[k] = h.get_tensor(k)
+    return out, set(keymap.keys())
 
 
 def detect_lm_prefix(keys):
@@ -118,24 +140,24 @@ def main():
             ign.append(pat)
 
     # ---------- 权重 ----------
-    print("\n[1/3] 读取量化后的 language_model 权重 ...")
-    qw = load_all_links_safe(qd)
-    print(f"      {len(qw)} 个张量")
+    print("\n[1/3] 读取原始模型键名（只读头部）...")
+    _, orig_keys = load_keys(od)
+    print(f"      原始模型共 {len(orig_keys)} 个键")
+    lm_prefix = detect_lm_prefix(orig_keys)
+    print(f"      language_model 前缀 = {lm_prefix}")
+
+    print("\n[2/3] 按需读取张量 ...")
+    qw, q_keys = load_keys(qd)
+    print(f"      量化产物: 全 {len(q_keys)} 键，读取 {len(qw)} 个")
 
     if is_wrapper:
-        print("[2/3] 读取原始模型的视觉塔等权重 ...")
-        ow = load_all_links_safe(od)
-        lm_prefix = detect_lm_prefix(ow)
         if lm_prefix is None:
             raise SystemExit("[FAIL] 原始模型里找不到 language_model（embed_tokens）")
-        print(f"      language_model 前缀 = {lm_prefix}")
+        # 原始模型只读【非 language_model】的部分（视觉塔等），省内存
+        ow, _ = load_keys(od, keep_fn=lambda k: not k.startswith(lm_prefix))
+        print(f"      原始模型非 LM 权重: 读取 {len(ow)} 个（视觉塔等）")
 
-        merged = {}
-        n_other = 0
-        for k, v in ow.items():
-            if not k.startswith(lm_prefix):
-                merged[k] = v            # 视觉塔 / 其它顶层权重原样保留
-                n_other += 1
+        merged = dict(ow)
         n_lm = 0
         for k, v in qw.items():
             nk = map_lm_key(k, lm_prefix)
@@ -144,9 +166,16 @@ def main():
                 continue
             merged[nk] = v
             n_lm += 1
-        print(f"      合并完成: 原始其它 {n_other} 个 + 量化 language_model {n_lm} 个")
+        print(f"      合并完成: 原始非LM {len(ow)} 个 + 量化 language_model {n_lm} 个")
     else:
         merged = qw
+
+    # 校验：量化张量是否都在
+    n_scale = sum(1 for k in merged if k.endswith("weight_scale"))
+    n_qscale_in = sum(1 for k in qw if k.endswith("weight_scale"))
+    print(f"      weight_scale: 量化产物 {n_qscale_in} 个 → 合并后 {n_scale} 个")
+    if n_qscale_in and n_scale < n_qscale_in:
+        raise SystemExit("[FAIL] 合并后 weight_scale 变少，键映射可能出错")
 
     # ---------- 写出 ----------
     print("[3/3] 写出 ...")
