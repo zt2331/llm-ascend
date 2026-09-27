@@ -272,10 +272,22 @@ def main():
         print(f"\n[OK] quantization_config = "
               f"{json.dumps(cfg.get('quantization_config'), ensure_ascii=False)[:200]}")
         print(f"[OK] architectures = {cfg.get('architectures')}")
-    # ★ 保存后立刻自检：量化是否真的落盘（防止"打印 OK 但产物是 fp16"的静默失败）
+    # ★ 多模态模型：自动恢复被剥离的 wrapper（否则 vLLM 加载失败 / 评测 nan）
+    _target_dir = out_dir
+    try:
+        from utils.mm_wrapper import maybe_restore
+        _fixed = maybe_restore(out_dir, model_path)
+        if _fixed:
+            _target_dir = _fixed
+            print(f"[OK] 已自动恢复多模态 wrapper -> {_fixed}")
+            print(f"     评测/部署请使用: {_fixed}")
+    except Exception as _e:
+        print(f"[WARN] wrapper 自动恢复异常: {_e}")
+
+    # ★ 保存后自检：检查【最终产物】量化是否真的落盘
     try:
         from utils.quant_check import inspect_quant_dir, format_report
-        _info = inspect_quant_dir(out_dir)
+        _info = inspect_quant_dir(_target_dir)
         print("")
         print(format_report(_info, title="量化产物自检"))
         if not _info["ok"]:
@@ -284,16 +296,6 @@ def main():
             return 5
     except Exception as _e:
         print(f"[WARN] 自检执行失败: {_e}")
-
-    # ★ 多模态模型：自动恢复被剥离的 wrapper（否则 vLLM 加载失败 / 评测 nan）
-    try:
-        from utils.mm_wrapper import maybe_restore
-        _fixed = maybe_restore(out_dir, model_path)
-        if _fixed:
-            print(f"[OK] 已自动恢复多模态 wrapper -> {_fixed}")
-            print(f"     评测/部署请使用: {_fixed}")
-    except Exception as _e:
-        print(f"[WARN] wrapper 自动恢复异常: {_e}")
 
     print(f"[OK] 已写出 -> {out_dir}")
     print(f"\n部署: bash scripts/serve_ascend.sh {out_dir} compressed-tensors")

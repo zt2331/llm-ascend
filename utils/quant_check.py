@@ -89,11 +89,20 @@ def inspect_quant_dir(d):
     info["cats"] = dict(cats)
 
     # ★ 决定性指标：权重张量的 dtype
-    #   int8 / uint8 / int32 → 量化成功；float16 / bfloat16 → 根本没量化
+    #   注意两种存储形式：
+    #     * int-quantized (W8A8)  : weight 本身是 int8 + weight_scale
+    #     * pack-quantized (W4A16) : weight_packed 是 int32（打包 8 个 4bit）+ weight_scale
+    #   只看 `.weight` 会漏掉 W4A16 → 误判成"没量化"。
     wdtypes = Counter(dtypes[k] for k in keys if k.endswith("weight"))
+    qdtypes = Counter(dtypes[k] for k in keys
+                      if k.endswith(("weight_packed", "qweight", "qzeros")))
     info["weight_dtypes"] = dict(wdtypes)
-    info["has_int_weight"] = any(d in ("I8", "U8", "I32", "I16", "U16")
-                                 for d in wdtypes)
+    info["quant_dtypes"] = dict(qdtypes)
+    INT_DTYPES = ("I8", "U8", "I32", "I16", "U16")
+    info["has_int_weight"] = (
+        any(d in INT_DTYPES for d in wdtypes)          # W8A8: weight 是 int8
+        or any(d in INT_DTYPES for d in qdtypes)       # W4A16: weight_packed 是 int32
+    )
     info["has_float_weight"] = any(d in ("F16", "BF16", "F32") for d in wdtypes)
 
     n_scale = cats.get("weight_scale", 0)
@@ -104,8 +113,9 @@ def inspect_quant_dir(d):
     # ---- 判定 0：权重 dtype（最直接的证据）----
     if not info["has_int_weight"] and info["n_quant_markers"] == 0:
         info["problems"].append(
-            f"权重张量全是浮点（dtype 分布 {info['weight_dtypes']}），"
-            "且无任何量化标记张量 → **量化完全没有生效**，产物就是原始 fp16 模型")
+            f"权重张量全是浮点（dtype 分布 {info['weight_dtypes']}，"
+            f"打包权重 dtype {info['quant_dtypes']}），且无任何量化标记张量 "
+            "→ **量化完全没有生效**，产物就是原始 fp16 模型")
 
     # ---- 判定 1：量化是否落盘 ----
     if info["n_quant_markers"] == 0:
@@ -133,10 +143,11 @@ def inspect_quant_dir(d):
                 if os.path.isfile(os.path.join(d, f))]
     info["mm_files"] = mm_files
     if not has_vision and mm_files:
-        info["problems"].append(
+        info["warnings"].append(
             "config 是纯文本（无 vision_config）但目录里有多模态处理器文件 "
-            f"{mm_files} → vLLM 会报 "
-            "TypeError: Expected Qwen3_5Config, but found Qwen3_5TextConfig")
+            f"{mm_files}。这是 llm-compressor 剥离 wrapper 的典型表现；"
+            "量化脚本会自动恢复成 <目录>-mm，恢复后即可正常部署（vLLM 直接加载本目录"
+            "会报 TypeError: Expected Qwen3_5Config ...）")
 
     # ---- 判定 4：linear_attn / visual 是否被误量化 ----
     n_la = sum(1 for k in keys if "linear_attn" in k and k.endswith("weight_scale"))
@@ -182,6 +193,7 @@ def format_report(info, title="量化产物校验"):
         L.append("quantization_config: 无")
     L.append(f"张量总数: {info.get('n_tensors')}   分类: {info.get('cats')}")
     L.append(f"权重 dtype 分布: {info.get('weight_dtypes')}")
+    L.append(f"打包权重 dtype  : {info.get('quant_dtypes')}")
     L.append(f"  └─ 有整型权重(量化成功标志): {info.get('has_int_weight')}")
     L.append(f"量化标记张量数: {info.get('n_quant_markers')}")
 
