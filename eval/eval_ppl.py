@@ -30,6 +30,7 @@ import config
 from utils import device as dev
 from utils.dataio import Dataset
 from utils.model_utils import load_model
+from utils.quant_check import inspect_quant_dir, format_report
 
 
 def detect_quant(path):
@@ -130,6 +131,17 @@ def ppl_vllm(model_path, tok, texts, seq, quant, gpu_util, prefer_device):
 
 def run_one(path, tok, texts, args, prefer_device):
     quant = detect_quant(path)
+    # ★ 加载前先校验量化产物；坏了直接报原因，避免拿到 nan 才猜
+    if quant:
+        info = inspect_quant_dir(path)
+        if not info["ok"]:
+            print(format_report(info, title="量化产物校验未通过"))
+            raise RuntimeError(
+                "量化产物无效（详见上方报告）；请勿继续评测，先按提示修复")
+        else:
+            print(f"    [校验] 量化产物 OK"
+                  f"（量化标记张量 {info['n_quant_markers']} 个，"
+                  f"ignore={info['ignore']}）")
     backend = args.backend
     if backend == "auto":
         backend = "vllm" if quant else "hf"

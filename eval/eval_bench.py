@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from utils import device as dev
 from utils.model_utils import load_model
+from utils.quant_check import inspect_quant_dir
 
 # ---------------- B. 内置 Mini-Bench（30 题，四选一） ----------------
 MINI_BENCH = [
@@ -185,6 +186,14 @@ def main():
         print(f"\n>>> {label}\n    {path}")
         entry = {}
         try:
+            q = detect_quant(path)
+            if q:
+                info = inspect_quant_dir(path)
+                if not info["ok"]:
+                    print("    [校验] ❌ 量化产物无效:")
+                    for pb in info["problems"]:
+                        print(f"        * {pb}")
+                    raise RuntimeError("量化产物无效，已跳过（用 scripts/07_inspect_quant.py 看详情）")
             model = load_model(path, prefer_device=args.device, need_logits=True)
             acc, tot = next_token_accuracy(model, tok, texts, args.seq, args.device)
             entry["next_token_acc"] = round(acc, 4) if acc is not None else None

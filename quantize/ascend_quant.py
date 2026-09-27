@@ -254,6 +254,19 @@ def main():
                 dst = os.path.join(out_dir, f)
                 if os.path.isfile(src) and not os.path.exists(dst):
                     shutil.copy(src, dst)
+            # ★ 保存后立刻自检：量化是否真的落盘（防止"打印 OK 但产物是 fp16"的静默失败）
+            try:
+                from utils.quant_check import inspect_quant_dir, format_report
+                _info = inspect_quant_dir(out_dir)
+                print("")
+                print(format_report(_info, title="量化产物自检"))
+                if not _info["ok"]:
+                    print("[FAIL] 量化产物校验未通过 —— 该产物不可用于评测/部署，"
+                          "请按上方提示排查后重新量化")
+                    return 5
+            except Exception as _e:
+                print(f"[WARN] 自检执行失败: {_e}")
+
             print(f"[OK] 已写出 -> {out_dir}")
             print(f"\n部署: bash scripts/serve_ascend.sh {out_dir} ascend")
             return 0
