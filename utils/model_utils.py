@@ -14,8 +14,12 @@ import torch.nn as nn
 from utils import device as dev
 
 VISION_ATTRS = ("visual", "vision_model", "vision_tower", "image_encoder", "vision_encoder")
-# llm-compressor recipe 里用于跳过视觉塔的正则
-VISION_IGNORE = [re.escape(a) + r"($|\.)" for a in VISION_ATTRS]
+
+# ★ llm-compressor 的 ignore 列表：**正则必须带 `re:` 前缀**，
+#   否则会被当作"字面字符串精确匹配"，导致通配模式全部失效（曾踩此坑）。
+_RE = "re:"
+# 跳过视觉塔
+VISION_IGNORE = [_RE + re.escape(a) + r"($|\.)" for a in VISION_ATTRS]
 
 
 def _find_lm_head_owner(model):
@@ -242,5 +246,6 @@ def quant_ignore_patterns(path, extra=None):
     if is_multimodal_config(path):
         ignore += VISION_IGNORE
     if has_linear_attn_config(path):
-        ignore.append(".*linear_attn.*")
+        # 注意 re: 前缀，否则不生效
+        ignore.append(_RE + r".*linear_attn.*")
     return ignore
