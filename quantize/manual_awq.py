@@ -263,7 +263,10 @@ def main():
         tok(r["text"], truncation=True, max_length=args.seq)["input_ids"], dtype=torch.long)}
         for r in rows]
 
-    model = load_model(model_path, prefer_device=args.device, dtype="float32", eval_mode=True)
+    # ★ 不要用 float32 加载整个模型：27B×4B≈108GB，必然 OOM。
+    #   缩放/量化的数学都在 awq_channel_scale / build_state_dict 里逐张量 .float()，
+    #   权重本身是 bf16 存的，fp32 加载不增加任何信息，纯粹浪费一倍显存。
+    model = load_model(model_path, prefer_device=args.device, dtype="bfloat16", eval_mode=True)
     print("\n[1/3] 采集归一化层输出激活 ...")
     acts = collect_norm_activations(model, ds, args.device)
     print(f"      采集到 {len(acts)} 层的激活统计")

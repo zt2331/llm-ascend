@@ -140,10 +140,32 @@ def load_model(path, prefer_device="auto", dtype="float16", device_map=None,
         ensure_lm_head(model, path)
 
     if device_map is None and d != "cpu":
-        try:
-            model.to(dev.get_device(prefer_device))
-        except Exception as e:
-            print(f"[WARN] 移动到 {d} 失败：{e}（继续用 CPU）")
+        # ★ 搬之前先估算权重体积：model.to() 是逐参数搬运，搬到一半 OOM 会留下
+        #   “部分参数在 NPU、部分在 CPU”的半迁移状态，之后 forward 照样在 NPU 上炸。
+        need_gb = sum(p.numel() * p.element_size()
+                      for p in model.parameters()) / 1024 ** 3
+        total_gb = dev.memory_total_gb(prefer_device)
+        alloc_gb = dev.memory_allocated_gb(prefer_device)
+        if alloc_gb < 0:
+            alloc_gb = 0.0
+        free_gb = total_gb - alloc_gb
+        if total_gb > 0 and need_gb > free_gb * 0.92:
+            print(f"[WARN] 权重约 {need_gb:.1f} GB，{d} 可用约 {free_gb:.1f} GB "
+                  f"→ 放不下，保持 CPU")
+            print(f"[WARN] 建议：换小模型（如 Qwen3.5-4B）或剪枝后的模型，"
+                  f"或显式 --device cpu")
+        else:
+            try:
+                model.to(dev.get_device(prefer_device))
+            except Exception as e:
+                print(f"[WARN] 移动到 {d} 失败：{str(e)[:120]}")
+                print("[WARN] 尝试把已迁移的参数搬回 CPU，避免半迁移状态")
+                try:
+                    model.to("cpu")
+                    dev.empty_cache(prefer_device)
+                    print("[WARN] 已回退 CPU 运行（会很慢，建议用更小的模型）")
+                except Exception as e2:
+                    print(f"[ERROR] 回退 CPU 也失败：{str(e2)[:120]}")
     if eval_mode:
         model.eval()
     return model

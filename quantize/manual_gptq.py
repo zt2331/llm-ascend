@@ -263,7 +263,21 @@ def main():
         tok(r["text"], truncation=True, max_length=args.seq)["input_ids"], dtype=torch.long)}
         for r in rows]
 
-    model = load_model(model_path, prefer_device=args.device, dtype="float32", eval_mode=True)
+    # ★ 同 manual_awq：不要用 float32 加载整个模型（27B×4B≈108GB 必 OOM）。
+    #   Hessian 构造与误差补偿都在内部 .float() 逐层算，模型保持 bf16 即可。
+    model = load_model(model_path, prefer_device=args.device, dtype="bfloat16", eval_mode=True)
+
+    # ★ GPTQ 的 Hessian 需要“每个线性层的全部校准激活”同时驻留 CPU，
+    #   27B 上很容易吃掉几十 GB 内存。先估算并预警，避免跑到一半被 OOM killer 干掉。
+    n_tok = sum(int(e["input_ids"].numel()) for e in ds)
+    est_gb = sum(n_tok * m.in_features * 4
+                 for _, m in iter_decoder_linears(model, PROJ_SUFFIXES)) / 1024 ** 3
+    print(f"[预估] 激活缓冲 {est_gb:.1f} GB（{len(ds)} 条 × 最多 {args.seq} token，fp32）")
+    if est_gb > 24:
+        sug = max(2, int(args.calib * 16 / max(est_gb, 1e-6)))
+        print(f"[WARN] 激活缓冲偏大，可能耗尽内存 → 建议 --calib {sug}，"
+              f"或先剪枝再跑 GPTQ")
+
     print("\n[1/3] 采集 Linear 输入激活（构造 Hessian）...")
     xbuf = collect_linear_inputs(model, ds, args.device)
     print(f"      采集到 {len(xbuf)} 个线性层的输入激活")
