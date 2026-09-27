@@ -132,6 +132,16 @@ def main():
     except Exception as _e:
         print(f"[WARN] 自检执行失败: {_e}")
 
+    # ★ 多模态模型：自动恢复被剥离的 wrapper（否则 vLLM 加载失败 / 评测 nan）
+    try:
+        from utils.mm_wrapper import maybe_restore
+        _fixed = maybe_restore(out_dir, model_path)
+        if _fixed:
+            print(f"[OK] 已自动恢复多模态 wrapper -> {_fixed}")
+            print(f"     评测/部署请使用: {_fixed}")
+    except Exception as _e:
+        print(f"[WARN] wrapper 自动恢复异常: {_e}")
+
     print(f"[OK] 已写出 -> {out_dir}")
     print(f"\n部署: bash scripts/serve_ascend.sh {out_dir} compressed-tensors")
     return 0
