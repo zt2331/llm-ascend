@@ -1,25 +1,32 @@
 #!/usr/bin/env python
-"""调库量化（llm-compressor）—— 昇腾 NPU 版，支持 RTN / AWQ / GPTQ。
+"""调库量化（llm-compressor）—— 昇腾 NPU 版，支持 SmoothQuant / AWQ / GPTQ / RTN。
 
-三种算法的区别（都通过 llm-compressor 实现）：
-  ┌────────┬────────────────────────────────────────┬───────────────────┐
-  │ method │ 做法                                    │ 典型 scheme       │
-  ├────────┼────────────────────────────────────────┼───────────────────┤
-  │ rtn    │ 直接四舍五入（无校准补偿），精度最差     │ W8A8 / W4A16      │
-  │ awq    │ 激活感知：按输入通道缩放保护重要通道，    │ W4A16（以 4bit 为主）│
-  │        │ AWQModifier(算缩放) + QuantizationModifier(落盘) │           │
-  │ gptq   │ Hessian 二阶 + 逐列误差补偿              │ W4A16 / W8A16     │
-  └────────┴────────────────────────────────────────┴───────────────────┘
+四种方法统一入口（都由 llm-compressor 实现）：
+  ┌────────┬──────────────────────────────────────────────┬─────────────────────┐
+  │ method │ 做法                                          │ 典型 scheme         │
+  ├────────┼──────────────────────────────────────────────┼─────────────────────┤
+  │ smooth │ **平滑量化 SmoothQuant**：把激活的离群大值      │ W8A8（昇腾主力）     │
+  │        │ 迁移到权重  Y=(X/s)(W·s)ᵀ，让 8bit 激活不溢出  │                     │
+  │        │ SmoothQuantModifier + QuantizationModifier     │                     │
+  │ awq    │ 激活感知：按输入通道缩放保护重要通道            │ W4A16(/W4A16_ASYM)  │
+  │ gptq   │ Hessian 二阶 + 逐列误差补偿                    │ W4A16 / W8A16       │
+  │ rtn    │ 直接四舍五入（无校准补偿），精度最差，仅作基线   │ W8A8 / W4A16        │
+  └────────┴──────────────────────────────────────────────┴─────────────────────┘
 
-★ AWQ/GPTQ 必须提供校准数据（本脚本已接 data/calib）。
+★ smooth / awq / gptq 都需要校准数据（本脚本已接 data/calib）。
 ★ 量化范围自动跳过 lm_head / 视觉塔 / linear_attn（utils.model_utils 生成 ignore）。
 
 用法（项目根）:
-    python quantize/gen_llmcomp.py --method awq  --bits 4          # AWQ 4bit
-    python quantize/gen_llmcomp.py --method gptq --bits 4          # GPTQ 4bit
-    python quantize/gen_llmcomp.py --method gptq --bits 8          # GPTQ 8bit
-    python quantize/gen_llmcomp.py --method rtn  --scheme W8A8     # RTN 基线
+    python quantize/gen_llmcomp.py --method smooth --scheme W8A8            # 平滑量化 W8A8
+    python quantize/gen_llmcomp.py --method smooth --alpha 0.75            # 调迁移强度
+    python quantize/gen_llmcomp.py --method awq  --bits 4                  # AWQ 4bit
+    python quantize/gen_llmcomp.py --method gptq --bits 4                  # GPTQ 4bit
+    python quantize/gen_llmcomp.py --method gptq --bits 8                  # GPTQ 8bit
+    python quantize/gen_llmcomp.py --method rtn  --scheme W8A8             # RTN 基线
     python quantize/gen_llmcomp.py --model output_models/pruned/xxx --method awq --bits 4
+
+说明：`quantize/w8a8_smooth.py` 是 SmoothQuant 的**专用入口**（等价于
+      `--method smooth --scheme W8A8`），保留它是为了保持原项目结构清晰。
 """
 import argparse
 import json
@@ -79,7 +86,7 @@ def _flatten(x):
     return out
 
 
-def build_recipe(method, scheme, group_size, ignore):
+def build_recipe(method, scheme, group_size, ignore, alpha=0.75):
     """构造 recipe（modifier 对象列表）。
 
     注意各版本 API 差异：
@@ -142,6 +149,23 @@ def build_recipe(method, scheme, group_size, ignore):
                 last = e
         raise RuntimeError(f"AWQModifier 构造失败（尝试 {len(plans)} 种签名）: {last}")
 
+    # ---------------- SmoothQuant（平滑量化）----------------
+    if method == "smooth":
+        from llmcompressor.modifiers.transform.smoothquant import SmoothQuantModifier
+        last = None
+        for kwargs in (dict(smoothing_strength=alpha), dict()):
+            try:
+                sq = SmoothQuantModifier(**kwargs)
+                mods = [sq, QuantizationModifier(targets=["Linear"],
+                                                 scheme=scheme, ignore=ignore)]
+                print(f"  [recipe] SmoothQuantModifier(smoothing_strength="
+                      f"{kwargs.get('smoothing_strength', '默认')}) + "
+                      f"QuantizationModifier({scheme})")
+                return mods
+            except Exception as e:
+                last = e
+        raise RuntimeError(f"SmoothQuantModifier 构造失败: {last}")
+
     # ---------------- RTN 基线 ----------------
     print(f"  [recipe] QuantizationModifier(scheme={scheme})  [RTN 基线]")
     return [QuantizationModifier(targets=["Linear"], scheme=scheme, ignore=ignore)]
@@ -150,8 +174,11 @@ def build_recipe(method, scheme, group_size, ignore):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None, help="待量化模型目录（默认 base）")
-    ap.add_argument("--method", default="awq", choices=["rtn", "awq", "gptq"],
-                    help="awq(激活感知) / gptq(二阶误差补偿) / rtn(朴素基线)")
+    ap.add_argument("--method", default="awq", choices=["smooth", "awq", "gptq", "rtn"],
+                    help="smooth(平滑量化 SmoothQuant) / awq(激活感知) / "
+                         "gptq(二阶误差补偿) / rtn(朴素基线)")
+    ap.add_argument("--alpha", type=float, default=0.75,
+                    help="SmoothQuant 迁移强度 0~1（越大越把量化难度给权重）")
     ap.add_argument("--scheme", default=None, help="显式指定 scheme；不填按 method+bits 推断")
     ap.add_argument("--bits", type=int, default=4, help="位宽（awq/gptq 默认 4）")
     ap.add_argument("--group-size", type=int, default=128)
@@ -165,7 +192,7 @@ def main():
 
     if args.scheme:
         scheme = args.scheme
-    elif args.method == "rtn":
+    elif args.method in ("rtn", "smooth"):
         scheme = "W8A8"
     else:
         scheme = "W4A16" if args.bits == 4 else "W8A16"
@@ -192,7 +219,8 @@ def main():
     print(f"\nignore = {ignore}")
 
     try:
-        recipe = build_recipe(args.method, scheme, args.group_size, ignore)
+        recipe = build_recipe(args.method, scheme, args.group_size, ignore,
+                          alpha=args.alpha)
     except Exception as e:
         print(f"[FAIL] 构造 recipe 失败: {e}")
         return 3

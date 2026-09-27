@@ -15,6 +15,11 @@ SmoothQuant 原理：
     python quantize/w8a8_smooth.py
     python quantize/w8a8_smooth.py --alpha 0.7 --calib 64 --seq 2048
     python quantize/w8a8_smooth.py --model output_models/pruned/xxx
+
+说明：本脚本是 **SmoothQuant 的专用入口**，等价于
+      `python quantize/gen_llmcomp.py --method smooth --scheme W8A8`
+      （后者把 SmoothQuant / AWQ / GPTQ / RTN 四种方法统一在一个入口里）。
+      两者产物内容一致，任选其一即可。
 """
 import argparse
 import json
