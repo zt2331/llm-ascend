@@ -106,17 +106,35 @@ def load_model(path, prefer_device="auto", dtype="float16", device_map=None,
         kwargs["device_map"] = device_map
 
     model = None
-    if need_logits:
-        # 纯文本模型优先 ForCausalLM（自带 lm_head）
+    arch = ""
+    try:
+        from transformers import AutoConfig
+        arch = " ".join(AutoConfig.from_pretrained(
+            path, trust_remote_code=True).architectures or [])
+    except Exception:
+        arch = ""
+
+    # ★ 多模态 VL 模型（如 Qwen3_5ForConditionalGeneration）用基座 AutoModel 加载时，
+    #   参数命名空间是 `language_model.*`，而 checkpoint 是 `model.language_model.*`，
+    #   量化参数(weight_scale)会因前缀不匹配加载不上 → NaN。
+    #   所以优先用 ForImageTextToText / ForConditionalGeneration 这类正确类。
+    for loader_name in (["AutoModelForImageTextToText"] if ("ConditionalGeneration" in arch
+                                                            or "ImageTextToText" in arch)
+                        else []) + (
+                        ["AutoModelForCausalLM"] if need_logits else []) + ["AutoModel"]:
         try:
-            model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
-        except Exception:
+            import transformers
+            loader = getattr(transformers, loader_name, None)
+            if loader is None:
+                continue
+            model = loader.from_pretrained(path, **kwargs)
+            print(f"[INFO] 用 {loader_name} 加载（architectures={arch or '未知'}）")
+            break
+        except Exception as e:
+            print(f"[INFO] {loader_name} 不可用: {str(e)[:80]}")
             model = None
     if model is None:
-        try:
-            model = AutoModel.from_pretrained(path, **kwargs)
-        except Exception:
-            model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+        raise RuntimeError(f"无法加载模型: {path}")
 
     if need_logits:
         ensure_lm_head(model, path)

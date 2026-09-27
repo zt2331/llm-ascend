@@ -13,6 +13,9 @@
 #   MAX_MODEL_LEN / GMU     覆盖默认长度与显存利用率
 #   DTYPE                   加载精度，默认 bfloat16（★昇腾量化算子要求 bf16/fp32，
 #                           用 float16 会报 aclnnQuantMatmulWeightNz 161002）
+#   MAX_NUM_SEQS            最大并发序列，默认 64（★Qwen3.6 是 Mamba 混合架构，
+#                           每序列占一个 Mamba cache block，设太大报
+#                           "max_num_seqs exceeds available Mamba cache blocks"）
 #
 # 说明:
 #   vllm-ascend 以插件形式注册 NPU 平台，安装后 `vllm serve` 默认走 NPU。
@@ -35,7 +38,8 @@ export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 ARGS=(serve "$MODEL" --host 0.0.0.0 --port "$PORT"
       --trust-remote-code --dtype "${DTYPE:-bfloat16}"
       --max-model-len "${MAX_MODEL_LEN:-4096}"
-      --gpu-memory-utilization "${GMU:-0.90}")
+      --gpu-memory-utilization "${GMU:-0.90}"
+      --max-num-seqs "${MAX_NUM_SEQS:-64}")
 if [ -n "$QUANT" ]; then
   ARGS+=(--quantization "$QUANT")
 fi
