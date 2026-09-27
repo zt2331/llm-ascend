@@ -42,6 +42,61 @@ python eval/eval_ppl.py --model output_models/quantized/*-mm --backend vllm --se
 
 ---
 
+## 2.5 ⚠️ 重要：当前对比混淆了「位宽」与「算法」两个变量
+
+上面 8.09 (W8A8) vs 8.20 (AWQ) 的对比**不能直接说"SmoothQuant 比 AWQ 好"**，
+因为两者**同时变了两个变量**：
+
+| 维度 | W8A8(SmoothQuant) | AWQ(W4A16) |
+|---|---|---|
+| **权重位宽** | **8 bit**（256 级） | **4 bit**（**仅 16 级**） |
+| 激活位宽 | 8 bit（动态 per-token） | 16 bit（不量化） |
+| 权重量化算法 | min/max per-channel | 激活感知缩放 + 网格搜索 |
+| 激活量化算法 | **SmoothQuant 平滑** | — |
+
+**结论解读**
+- 位宽差 4 bit → 权重量化固有误差相差约 **2^4 = 16 倍**；算法优化难以完全弥补。
+- 因此 **W8A8 优于 W4A16 是符合预期的**（也是文献中的普遍规律）。
+- AWQ 的"激活感知"优势应体现在**同为 4bit 时**与 RTN-4bit 的对比上。
+
+### 正确的对照实验设计（控制变量）
+
+| # | 配置 | 隔离的变量 | 状态 |
+|---|---|---|---|
+| 1 | W8A8 + **RTN** | W8A8 的朴素基线 | 待测 |
+| 2 | W8A8 + **SmoothQuant** | ← **平滑的增益** | ✅ 8.09 |
+| 3 | W4A16 + **RTN** | 4bit 的朴素基线 | 待测 |
+| 4 | W4A16 + **AWQ** | ← **AWQ 的增益** | ✅ 8.20 |
+
+计算增益：
+```
+平滑增益 = PPL(RTN-W8A8)  - 8.09
+AWQ 增益 = PPL(RTN-W4A16) - 8.20
+```
+
+**复现**
+```bash
+python quantize/gen_llmcomp.py --method rtn --scheme W8A8 \
+  --model output_models/pruned/pruned-Qwen3.6-27B-56layers --calib 128 --seq 1024
+python quantize/gen_llmcomp.py --method rtn --scheme W4A16 \
+  --model output_models/pruned/pruned-Qwen3.6-27B-56layers --calib 128 --seq 1024
+python eval/eval_ppl.py --model output_models/quantized/*-mm --backend vllm --seq 512
+```
+
+### 文献参考退化区间（与本次结果一致）
+
+| 方法 | 典型退化 | 本次实测 |
+|---|---|---|
+| SmoothQuant W8A8 | <1% | +0.87% ✅ |
+| AWQ W4A16 | 1~3% | +2.24% ✅ |
+| RTN W4A16 | 5~15% | 待测 |
+
+> 📌 注意区分：**SmoothQuant 不是朴素方法**。朴素 W8A8 是 `--method rtn`
+> （直接 min/max + round）；SmoothQuant 是在其之上叠加了激活离群迁移
+> `Y=(X/s)(W·s)ᵀ`（MIT，2022）。
+
+---
+
 ## 3. 关键对照实验：校准数据质量的影响
 
 同一套代码、同一模型，**只换校准/评测语料**：
