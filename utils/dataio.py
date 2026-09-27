@@ -1,32 +1,28 @@
-"""轻量数据读写（替代 datasets 库）—— 只依赖 pandas + pyarrow。
+"""数据读写：parquet + `text` 列。
 
-为什么不用 `datasets`：
-  1. `datasets` 会拉起一大堆依赖，容易和镜像里已装的 transformers 版本冲突；
-  2. 本项目只需要「读 parquet 的 text 列」这一件事，pandas 足够；
-  3. 昇腾镜像里 pandas 通常已内置，只需再装 pyarrow。
-
-提供与 `datasets.Dataset` 兼容的最小垫片，业务代码改动最小：
-    from utils.dataio import Dataset
-    ds = Dataset.from_parquet("xxx.parquet").select(range(16))
-    for r in ds: ... r["text"] ...
+数据已固定，**不做任何格式猜测/兜底**：
+    data/calib/validation.parquet   校准集
+    data/test/test.parquet          评测集
+    列名必须为 `text`
+缺文件或缺列直接报错，不静默回退。
 """
 import os
 
+TEXT_COL = "text"
+
 
 class Dataset:
-    """极简 Dataset 垫片：仅实现本项目用到的 from_parquet / select / 迭代 / 长度。"""
+    """最小 Dataset 垫片：仅实现本项目用到的 from_parquet / select / 迭代 / 长度。"""
 
     def __init__(self, rows):
         self._rows = rows                       # list[dict]
 
     @classmethod
     def from_parquet(cls, path, **kwargs):
-        rows = load_rows(path)
-        return cls(rows)
+        return cls(load_rows(path))
 
     def select(self, rng):
-        idx = list(rng)
-        return Dataset([self._rows[i] for i in idx])
+        return Dataset([self._rows[i] for i in list(rng)])
 
     def __len__(self):
         return len(self._rows)
@@ -42,27 +38,31 @@ class Dataset:
         return list(self._rows[0].keys()) if self._rows else []
 
 
-def load_rows(path, text_col="text"):
-    """读 parquet → [{"text": ...}, ...]。若没有 text 列，自动取第一个字符串列。"""
+def load_rows(path):
+    """读 parquet → [{"text": ...}, ...]。文件/列缺失即报错。"""
     import pandas as pd
+
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"找不到数据文件: {path}")
+        raise FileNotFoundError(
+            f"数据文件不存在: {path}\n"
+            f"  本项目数据已固定，需要:\n"
+            f"    data/calib/validation.parquet  (校准集)\n"
+            f"    data/test/test.parquet         (评测集)\n"
+            f"  两列名均为 `text`。")
     df = pd.read_parquet(path)
-    if text_col not in df.columns:
-        cands = [c for c in df.columns if df[c].dtype == object] or list(df.columns)
-        df = df.rename(columns={cands[0]: text_col})
-    return [{text_col: str(t)} for t in df[text_col].tolist()]
+    if TEXT_COL not in df.columns:
+        raise ValueError(
+            f"{path} 缺少 `{TEXT_COL}` 列，实际列为 {list(df.columns)}。"
+            f"请把文本列命名为 `{TEXT_COL}`。")
+    return [{TEXT_COL: str(t)} for t in df[TEXT_COL].tolist()]
 
 
-def save_rows(rows, path, text_col="text"):
-    """[{"text": ...}] 或 [str] → parquet。"""
+def save_rows(texts, path):
+    """[str] 或 [{"text": ...}] → parquet。"""
     import pandas as pd
-    d = os.path.dirname(os.path.abspath(path))
-    if d:
-        os.makedirs(d, exist_ok=True)
-    if rows and isinstance(rows[0], dict):
-        texts = [r[text_col] for r in rows]
-    else:
-        texts = list(rows)
-    pd.DataFrame({text_col: texts}).to_parquet(path, index=False)
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    if texts and isinstance(texts[0], dict):
+        texts = [r[TEXT_COL] for r in texts]
+    pd.DataFrame({TEXT_COL: list(texts)}).to_parquet(path, index=False)
     return path

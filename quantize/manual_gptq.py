@@ -257,7 +257,7 @@ def main():
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    full = Dataset.from_parquet(os.path.join(config.CALIB_DIR, "validation.parquet"))
+    full = Dataset.from_parquet(config.CALIB_PARQUET)
     rows = full.select(range(min(args.calib, len(full))))
     ds = [{"input_ids": torch.tensor(
         tok(r["text"], truncation=True, max_length=args.seq)["input_ids"], dtype=torch.long)}

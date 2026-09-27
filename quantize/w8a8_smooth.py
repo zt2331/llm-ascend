@@ -85,7 +85,7 @@ def main():
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    full = Dataset.from_parquet(os.path.join(config.CALIB_DIR, "validation.parquet"))
+    full = Dataset.from_parquet(config.CALIB_PARQUET)
     rows = [r for r in full.select(range(min(args.calib, len(full))))]
 
     ignore = quant_ignore_patterns(model_path)

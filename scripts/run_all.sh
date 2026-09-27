@@ -93,9 +93,9 @@ if want model; then
   echo "[OK] MODEL_PATH=$MODEL_PATH"
 fi
 
-# ---------- 2. 备数据 ----------
+# ---------- 2. 校验数据（数据已固定，随 git 管理，不再生成）----------
 if want data; then
-  run_stage data "$PY" scripts/04_prepare_data.py --calib "$CALIB" --test 32
+  run_stage data "$PY" scripts/04_check_data.py || exit 3
 fi
 
 # ---------- 3. 剪枝 ----------

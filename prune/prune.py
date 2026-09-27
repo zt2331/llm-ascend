@@ -146,7 +146,7 @@ def main():
 
     print(f"[剪枝] 模型: {model_path}  设备: {dev.default_device(args.device)}")
     tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    pq = os.path.join(config.CALIB_DIR, "validation.parquet")
+    pq = config.CALIB_PARQUET
     full = Dataset.from_parquet(pq)
     df = full.select(range(min(args.calib, len(full))))
     ds = [{"input_ids": torch.tensor(

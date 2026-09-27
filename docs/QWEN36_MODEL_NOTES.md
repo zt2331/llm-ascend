@@ -150,3 +150,22 @@ Eco-Tech/Qwen3.6-27B-w8a8   （W8A8 量化版，36.45 GB）
 | 量化 | `quantize/*.py` | ignore 带 `re:`；跳过 linear_attn / visual |
 | 评测 | `eval/eval_ppl.py --backend vllm` | 避免 27B OOM |
 | 部署 | `scripts/serve_ascend.sh` | 支持 `LANGUAGE_MODEL_ONLY=1` |
+
+---
+
+## 7. 数据（已固定）
+
+数据随仓库版本管理，**不再有任何格式猜测或兜底逻辑**：
+
+| 文件 | 条数 | 用途 |
+|---|---|---|
+| `data/calib/validation.parquet` | 510 | 量化/剪枝的校准集 |
+| `data/test/test.parquet` | 580 | PPL / 基准评测集 |
+
+- 来源：WikiText-2（平均约 2200 字符/条，总量约 130 万字符）
+- 列名必须是 `text`
+- 校验：`python scripts/04_check_data.py`
+- 读取：`utils/dataio.py`（缺文件或缺列直接报错，不静默回退）
+
+> ⚠️ 注意：早期的 W8A8 PPL 偏高（19.40 vs base 12.6）是在**合成兜底语料**
+> （二十几段循环文本）上测得，不能与基于本数据的结果直接比较。

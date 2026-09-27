@@ -245,7 +245,7 @@ def main():
         return 3
 
     tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    full = Dataset.from_parquet(os.path.join(config.CALIB_DIR, "validation.parquet"))
+    full = Dataset.from_parquet(config.CALIB_PARQUET)
     rows = [r for r in full.select(range(min(args.calib, len(full))))]
     loader = build_calib_loader(tok, rows, args.seq)
     print(f"校准样本 {len(rows)} 条，最大长度 {args.seq}\n")

@@ -22,7 +22,7 @@ from utils.model_utils import load_model
 
 def build_batches(tok, calib_n, seq):
     from utils.dataio import Dataset
-    pq = os.path.join(config.CALIB_DIR, "validation.parquet")
+    pq = config.CALIB_PARQUET
     full = Dataset.from_parquet(pq)
     df = full.select(range(min(calib_n, len(full))))
     out = []
@@ -87,7 +87,7 @@ def main():
 
     batches = build_batches(tok, args.calib, args.seq)
     if not batches:
-        raise SystemExit("校准数据为空，请先运行 scripts/04_prepare_data.py")
+        raise SystemExit("校准数据为空，请先运行 scripts/04_check_data.py 检查数据")
 
     opt = torch.optim.AdamW([p for p in student.parameters() if p.requires_grad], lr=args.lr)
     step = 0

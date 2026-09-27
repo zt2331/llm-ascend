@@ -2,10 +2,12 @@
 output_models/*
 !output_models/.gitkeep
 
-# ---------- 数据（跑 scripts/04_prepare_data.py 自动生成）----------
-data/calib/*.parquet
-data/test/*.parquet
-data/raw/*.parquet
+# ---------- 数据 ----------
+# 数据已固定（WikiText-2，见 data/calib/validation.parquet 与 data/test/test.parquet），
+# 纳入 git 版本管理，因此这里**不忽略** *.parquet。
+# 仅忽略临时/中间文件。
+data/**/*.tmp
+data/raw/
 
 # ---------- 模型权重（体积大，绝不提交）----------
 qwen_model/

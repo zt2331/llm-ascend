@@ -168,9 +168,9 @@ def main():
     from utils.dataio import Dataset
     from transformers import AutoTokenizer
 
-    pq = os.path.join(config.TEST_DIR, "test.parquet")
+    pq = config.TEST_PARQUET
     if not os.path.isfile(pq):
-        raise SystemExit("缺少测试集，请先运行: python scripts/04_prepare_data.py")
+        raise SystemExit("缺少测试集，请先运行: python scripts/04_check_data.py")
     full = Dataset.from_parquet(pq)
     texts = [r["text"] for r in full.select(range(min(32, len(full))))]
 

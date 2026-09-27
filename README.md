@@ -18,6 +18,10 @@ cd llm-ascend
 python scripts/02_check_env.py
 bash scripts/01b_install_deps.sh     # 缺依赖时装（不用 conda）
 
+# 数据已随仓库提供（data/calib/validation.parquet 510 条 + data/test/test.parquet 580 条），
+# 只需校验一次：
+python scripts/04_check_data.py
+
 # ② 一键全流程（环境自检 → 找模型 → 备数据 → 剪枝 → 蒸馏 → 量化 → 评测 → 出报告）
 bash scripts/run_all.sh
 
@@ -124,7 +128,7 @@ export PYTHONPATH=$PWD:$PYTHONPATH
 
 python scripts/02_check_env.py                    # 环境自检
 python scripts/03_find_model.py                   # 找 base 模型
-python scripts/04_prepare_data.py --calib 64      # 准备校准/评测语料
+python scripts/04_check_data.py                   # 校验数据（数据已固定，随 git 管理）
 
 python prune/prune.py     --keep 48 --calib 16 --seq 512     # 剪枝
 python distill/distill.py --epochs 1 --max-steps 40          # 蒸馏
@@ -203,7 +207,7 @@ llm_ascend/
 │   ├── 01c_conda_setup.sh         # ★ 一键 conda 建环境（自动对齐版本+保底）
 │   ├── 02_check_env.py        # 环境自检（版本/设备/算子/CANN）
 │   ├── 03_find_model.py
-│   ├── 04_prepare_data.py     # 数据准备（parquet > 本地语料 > 联网 > 内置兜底）
+│   ├── 04_check_data.py       # 数据校验（数据固定，只检查不生成）
 │   ├── run_all.sh             # ★ 一键全流程
 │   ├── serve_ascend.sh        # vLLM(Ascend) 启动
 │   └── loadtest.py            # 并发压测

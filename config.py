@@ -20,10 +20,12 @@ PRUNE_DIR = os.path.join(OUT, "pruned")
 DISTILL_DIR = os.path.join(OUT, "distilled")
 RESULTS_DIR = os.path.join(OUT, "results")
 
-# 数据目录（校准/评测语料）
+# 数据（已固定，随 git 版本管理；列名必须为 text）
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 CALIB_DIR = os.path.join(DATA_DIR, "calib")
 TEST_DIR = os.path.join(DATA_DIR, "test")
+CALIB_PARQUET = os.path.join(CALIB_DIR, "validation.parquet")   # 校准集
+TEST_PARQUET = os.path.join(TEST_DIR, "test.parquet")           # 评测集
 
 
 # ------------------------------------------------------------------
