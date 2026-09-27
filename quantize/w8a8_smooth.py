@@ -76,7 +76,7 @@ def main():
         print("       → 昇腾上可改用: python quantize/ascend_quant.py --scheme W8A8")
         return 3
 
-    from datasets import Dataset
+    from utils.dataio import Dataset
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)

@@ -107,7 +107,7 @@ def main():
 
     config.ensure_dirs()
     model_path = config.require_model()
-    from datasets import Dataset
+    from utils.dataio import Dataset
     from transformers import AutoTokenizer
 
     print(f"[剪枝] 模型: {model_path}  设备: {dev.default_device(args.device)}")

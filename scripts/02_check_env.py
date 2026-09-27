@@ -2,11 +2,11 @@
 """02_check_env.py —— 昇腾环境自检（跑任何流程前先跑这个）。
 
 检查内容：
-  1. Python / 关键包版本（与镜像版本矩阵对照）
+  1. Python 与关键包版本（用 importlib.metadata 读包元数据，避免误报）
   2. torch_npu 是否可用、NPU 设备数量/型号/显存
-  3. CANN 版本 + npu-smi 输出
+  3. CANN 环境变量 + npu-smi
   4. 在 NPU 上做一次真实张量运算（验证算子可用）
-  5. 项目依赖是否齐全（matplotlib/llmcompressor 等）
+  5. 项目依赖是否齐全
 """
 import os
 import shutil
@@ -15,49 +15,84 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 镜像自带版本（用于对照，不一致只提示不报错）
-EXPECT = {
-    "torch": "2.10.0",
-    "torch_npu": "2.10.0.post4",
-    "vllm": "0.23.0",
-    "vllm_ascend": "0.23.0",
-    "triton_ascend": "3.2.2",
-}
+OK, BAD, WARN = "[ OK ]", "[FAIL]", "[WARN]"
 
-OK = "[ OK ]"
-BAD = "[FAIL]"
-WARN = "[WARN]"
+# 包名映射：(发行包名, 导入模块名, 期望版本)
+# ⚠️ 注意：很多包没有 __version__ 属性，必须用 importlib.metadata 读包元数据，
+#    否则会出现"装了却显示没装"的误报（如 vllm-ascend）。
+PKGS = [
+    ("torch",        "torch",         "2.10.0"),
+    ("torch-npu",    "torch_npu",     "2.10.0.post4"),
+    ("vllm",         "vllm",          "0.23.0"),
+    ("vllm-ascend",  "vllm_ascend",   "0.23.0"),
+    ("triton-ascend", "triton",       "3.2.2"),   # 模块名是 triton，发行包名是 triton-ascend
+    ("transformers", "transformers",  None),
+    ("numpy",        "numpy",         None),
+    ("pandas",       "pandas",        None),
+    ("pyarrow",      "pyarrow",       None),
+    ("matplotlib",   "matplotlib",    None),
+    ("safetensors",  "safetensors",   None),
+    ("tqdm",         "tqdm",          None),
+]
+
+# 项目跑通所需（缺失会直接失败或出不了图）
+REQUIRED = ["numpy", "pandas", "pyarrow"]
+CHART_REQUIRED = ["matplotlib"]
+OPTIONAL = ["llmcompressor", "msmodelslim"]
 
 
-def _ver(mod):
+def pkg_version(dist_name):
+    """从包元数据读版本（最可靠）。返回 None 表示未安装。"""
     try:
-        m = __import__(mod)
-        return getattr(m, "__version__", "?")
+        from importlib.metadata import version, PackageNotFoundError
+    except Exception:
+        return None
+    try:
+        return version(dist_name)
+    except PackageNotFoundError:
+        return None
     except Exception:
         return None
 
 
+def can_import(module_name):
+    try:
+        __import__(module_name)
+        return True
+    except Exception:
+        return False
+
+
 def main():
-    print("=" * 72)
+    print("=" * 74)
     print("昇腾 NPU 环境自检")
-    print("=" * 72)
+    print("=" * 74)
 
     # ---------- 1. Python ----------
-    print(f"\n[1] Python: {sys.version.split()[0]}  ({sys.executable})")
+    print(f"\n[1] Python: {sys.version.split()[0]}")
+    print(f"    解释器: {sys.executable}")
+    in_conda = "conda" in sys.executable or os.environ.get("CONDA_PREFIX")
+    print(f"    环境类型: {'conda 环境' if in_conda else '镜像自带系统 Python（无需 conda 即可运行）'}")
 
     # ---------- 2. 版本对照 ----------
-    print("\n[2] 版本对照（镜像自带 vs 当前）")
-    real_mods = {"torch": "torch", "torch_npu": "torch_npu", "vllm": "vllm",
-                 "vllm_ascend": "vllm_ascend", "triton_ascend": "triton_ascend"}
-    missing = []
-    for k, mod in real_mods.items():
-        v = _ver(mod)
+    print("\n[2] 关键包版本（读包元数据，非模块属性）")
+    print(f"    {'包名':<16}{'版本':>18}   {'期望':<16}{'状态'}")
+    missing_pkgs = []
+    for dist, mod, expect in PKGS:
+        v = pkg_version(dist)
+        imp = can_import(mod)
         if v is None:
-            missing.append(k)
-            print(f"    {k:16s} {'(未安装)':>18s}   期望 {EXPECT[k]}")
-        else:
-            flag = OK if v.startswith(EXPECT[k].split(".post")[0]) else WARN
-            print(f"    {k:16s} {v:>18s}   期望 {EXPECT[k]}  {flag}")
+            if imp:
+                v = "(可导入,无元数据)"
+            else:
+                missing_pkgs.append(dist)
+                print(f"    {dist:<16}{'(未安装)':>18}   {str(expect or '-'):<16}{BAD}")
+                continue
+        status = OK
+        if expect and isinstance(v, str) and v[0].isdigit():
+            base = expect.split(".post")[0]
+            status = OK if v.startswith(base) else WARN
+        print(f"    {dist:<16}{v:>18}   {str(expect or '-'):<16}{status}")
 
     # ---------- 3. torch_npu / NPU ----------
     print("\n[3] torch_npu 与 NPU 设备")
@@ -79,26 +114,26 @@ def main():
                     print(f"      npu:{i}  读取属性失败: {e}")
     except Exception as e:
         print(f"    {BAD} 无法使用 NPU: {e}")
-        print("    → 若在新建的 conda 环境里，请改用镜像自带环境：")
-        print("      REUSE_BASE=1 bash scripts/01_create_env.sh")
+        print("    → 检查: source /usr/local/Ascend/ascend-toolkit/set_env.sh")
 
-    # ---------- 4. CANN / npu-smi ----------
+    # ---------- 4. CANN ----------
     print("\n[4] CANN 与 npu-smi")
-    cann = os.environ.get("ASCEND_HOME_PATH") or os.environ.get("ASCEND_TOOLKIT_HOME") or "(未设置环境变量)"
-    print(f"    ASCEND_HOME_PATH = {cann}")
+    print(f"    ASCEND_HOME_PATH = {os.environ.get('ASCEND_HOME_PATH', '(未设置)')}")
     if shutil.which("npu-smi"):
         try:
-            out = subprocess.run(["npu-smi", "info"], capture_output=True, text=True, timeout=30)
-            lines = (out.stdout or "").strip().splitlines()
-            for line in lines[:12]:
+            out = subprocess.run(["npu-smi", "info"], capture_output=True,
+                                 text=True, timeout=30)
+            lines = (out.stdout or out.stderr or "").strip().splitlines()
+            if not lines:
+                print(f"    {WARN} npu-smi 无输出（容器内常见，不影响推理）")
+            for line in lines[:8]:
                 print("    | " + line)
         except Exception as e:
-            print(f"    npu-smi 执行失败: {e}")
+            print(f"    {WARN} npu-smi 执行异常: {e}")
     else:
-        print(f"    {WARN} 未找到 npu-smi（不影响训练/推理，仅影响监控）")
-        print("    → 可执行: source /usr/local/Ascend/ascend-toolkit/set_env.sh")
+        print(f"    {WARN} 未找到 npu-smi（仅影响硬件监控，不影响推理）")
 
-    # ---------- 5. NPU 上真实算子验证 ----------
+    # ---------- 5. NPU 算子验证 ----------
     print("\n[5] NPU 真实算子验证（矩阵乘）")
     if npu_ok:
         try:
@@ -107,7 +142,7 @@ def main():
             b = torch.randn(512, 512, dtype=torch.float16).npu()
             c = a @ b
             torch.npu.synchronize()
-            print(f"    {OK} NPU 矩阵乘成功, 输出 shape={tuple(c.shape)}, "
+            print(f"    {OK} NPU 矩阵乘成功, shape={tuple(c.shape)}, "
                   f"均值={c.float().mean().item():.4f}")
         except Exception as e:
             print(f"    {BAD} NPU 算子执行失败: {e}")
@@ -116,23 +151,42 @@ def main():
 
     # ---------- 6. 项目依赖 ----------
     print("\n[6] 项目依赖")
-    deps = ["pandas", "pyarrow", "numpy", "tqdm", "matplotlib",
-            "datasets", "transformers", "safetensors"]
-    for d in deps:
-        v = _ver(d)
-        print(f"    {d:16s} {v if v else '(未安装)'}   {OK if v else BAD}")
-    for d in ["llmcompressor", "msmodelslim"]:
-        v = _ver(d)
-        print(f"    {d:16s} {v if v else '(未安装, 可选)'}")
+    miss_req, miss_chart = [], []
+    print("    必需（缺了跑不动）:")
+    for d in REQUIRED:
+        v = pkg_version(d)
+        print(f"      {d:<16}{v if v else '(未安装)':>14}   {OK if v else BAD}")
+        if not v:
+            miss_req.append(d)
+    print("    出图所需（缺了只有表没有图）:")
+    for d in CHART_REQUIRED:
+        v = pkg_version(d)
+        print(f"      {d:<16}{v if v else '(未安装)':>14}   {OK if v else BAD}")
+        if not v:
+            miss_chart.append(d)
+    print("    可选:")
+    for d in OPTIONAL:
+        v = pkg_version(d)
+        print(f"      {d:<16}{v if v else '(未安装, 可选)':>14}")
 
     # ---------- 汇总 ----------
-    print("\n" + "=" * 72)
-    if npu_ok:
-        print("结论: 环境可用 ✅  可以执行: bash scripts/run_all.sh")
-    else:
-        print("结论: NPU 不可用 ❌  请先按上面的提示修好 NPU 再跑流程")
-    print("=" * 72)
-    return 0 if npu_ok else 2
+    print("\n" + "=" * 74)
+    if not npu_ok:
+        print("结论: NPU 不可用 ❌  请先修好 NPU 再跑流程")
+        return 2
+
+    if miss_req or miss_chart:
+        need = miss_req + miss_chart
+        print(f"结论: NPU 可用 ✅  但缺少依赖: {', '.join(need)}")
+        print("      一键安装（用国内镜像）:")
+        print(f"        pip install {' '.join(need)} -i "
+              "https://pypi.tuna.tsinghua.edu.cn/simple")
+        print("      装完再跑: bash scripts/run_all.sh")
+        return 3
+
+    print("结论: 环境完全就绪 ✅  可以执行: bash scripts/run_all.sh")
+    print("=" * 74)
+    return 0
 
 
 if __name__ == "__main__":

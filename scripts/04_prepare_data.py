@@ -113,11 +113,9 @@ def _have_parquet(d):
 
 
 def _write_parquet(texts, out_path):
-    import pandas as pd
-    df = pd.DataFrame({"text": texts})
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    df.to_parquet(out_path, index=False)
-    return len(df)
+    from utils.dataio import save_rows
+    save_rows(list(texts), out_path)
+    return len(texts)
 
 
 def _split_docs(raw, calib_n, test_n):

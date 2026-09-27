@@ -253,7 +253,7 @@ def main():
     print(f"设备: {dev.default_device(args.device)}")
     print("=" * 72)
 
-    from datasets import Dataset
+    from utils.dataio import Dataset
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)

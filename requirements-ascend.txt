@@ -12,8 +12,9 @@ vllm-ascend==0.23.0
 triton-ascend==3.2.2
 
 # ---- 模型 / 数据处理 ----
+# 说明：本项目已用 utils/dataio.py（pandas+pyarrow）替代 datasets 库，
+#       避免 datasets 的依赖与镜像里已装的 transformers 版本冲突。
 transformers
-datasets
 accelerate
 safetensors
 sentencepiece

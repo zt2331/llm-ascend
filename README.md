@@ -12,15 +12,24 @@
 ## 一、30 秒跑通（已经配好环境的情况）
 
 ```bash
-cd llm_ascend
+cd llm-ascend
 
-# 一键全流程（环境自检 → 找模型 → 备数据 → 剪枝 → 蒸馏 → 量化 → 评测 → 出报告）
+# ① 先确认环境（NPU 可用？缺哪些依赖？）
+python scripts/02_check_env.py
+bash scripts/01b_install_deps.sh     # 缺依赖时装（不用 conda）
+
+# ② 一键全流程（环境自检 → 找模型 → 备数据 → 剪枝 → 蒸馏 → 量化 → 评测 → 出报告）
 bash scripts/run_all.sh
 
-# 看结果
+# ③ 看结果
 cat output_models/results/REPORT.md
 ls  output_models/results/fig_*.png
 ```
+
+> 首次跑建议先用小参数验证流程通不通（几分钟级）：
+> ```bash
+> KEEP=40 CALIB=8 SEQ=256 SKIP_DISTILL=1 SKIP_MANUAL=1 bash scripts/run_all.sh
+> ```
 
 跑完你会得到：
 
@@ -40,13 +49,37 @@ output_models/results/
 
 ---
 
-## 二、从零开始：装 Miniconda + 建环境
+## 二、环境准备
 
-> 镜像自带的环境**已经可用**。新建 conda 环境是为了练习"像在 CUDA 上一样熟练地搭国产环境"。
-> 如果新环境装不上 torch_npu，脚本会提示**回退方案**（直接用镜像环境），保证你能跑通。
+### 2.0 最快路径：不用 conda（⭐ 推荐先这样跑通）
+
+**昇腾镜像自带的系统 Python 已经装好了 `torch_npu / vllm / vllm-ascend`，不需要 conda。**
+只要补几个项目依赖即可：
 
 ```bash
-cd llm_ascend
+cd llm-ascend
+
+# 自检：确认 NPU 可用 + 看缺哪些包
+python scripts/02_check_env.py
+
+# 补依赖（pyarrow 读写 parquet、matplotlib 出图）
+bash scripts/01b_install_deps.sh
+# 等价于： pip install pyarrow matplotlib -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 再自检，直到显示「环境完全就绪 ✅」
+python scripts/02_check_env.py
+```
+
+> 📌 提示：系统 Python 常见路径 `/usr/local/python3.12.13/bin/python`。
+> `02_check_env.py` 会打印实际使用的解释器与环境类型。
+
+### 2.1 可选：装 Miniconda 建独立环境（练习用）
+
+> 目的是**练习"像在 CUDA 上一样熟练地搭国产环境"**，不是跑通的必要条件。
+> 如果新环境装不上 torch_npu，脚本会提示**回退方案**（直接用镜像环境）。
+
+```bash
+cd llm-ascend
 
 # ① 装 Miniconda（自动识别 ARM64/x86_64，用清华镜像）
 bash scripts/00_install_miniconda.sh
@@ -136,7 +169,8 @@ llm_ascend/
 ├── config.py                  # 路径/模型搜索（NPU 环境常见目录全覆盖）
 ├── utils/
 │   ├── device.py              # ★ 设备抽象层：NPU/CUDA/CPU 自动切换
-│   └── model_utils.py         # 文本 decoder 定位、量化 ignore 构造
+│   ├── model_utils.py         # 文本 decoder 定位、量化 ignore 构造
+│   └── dataio.py              # 轻量 parquet 读写（不依赖 datasets 库）
 ├── prune/prune.py             # 结构化剪枝（ShortGPT 块重要度）
 ├── distill/distill.py         # 知识蒸馏（KL，base 当 teacher）
 ├── quantize/
@@ -151,8 +185,9 @@ llm_ascend/
 │   └── deploy_metric.py       # vLLM(Ascend) decode 吞吐 / TTFT / 显存
 ├── report/make_report.py      # ★ 表格(MD/CSV) + 图表(PNG) 生成
 ├── scripts/
-│   ├── 00_install_miniconda.sh
-│   ├── 01_create_env.sh
+│   ├── 00_install_miniconda.sh    # 可选：装 Miniconda
+│   ├── 01_create_env.sh           # 可选：建 conda 环境
+│   ├── 01b_install_deps.sh        # ★ 不用 conda，直接补依赖
 │   ├── 02_check_env.py        # 环境自检（版本/设备/算子/CANN）
 │   ├── 03_find_model.py
 │   ├── 04_prepare_data.py     # 数据准备（parquet > 本地语料 > 联网 > 内置兜底）

@@ -164,7 +164,7 @@ def main():
     args = ap.parse_args()
 
     config.ensure_dirs()
-    from datasets import Dataset
+    from utils.dataio import Dataset
     from transformers import AutoTokenizer
 
     pq = os.path.join(config.TEST_DIR, "test.parquet")

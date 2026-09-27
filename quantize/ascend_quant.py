@@ -41,7 +41,7 @@ def _import_msmodelslim():
 
 
 def build_calib(tok, calib_n, seq):
-    from datasets import Dataset
+    from utils.dataio import Dataset
     pq = os.path.join(config.CALIB_DIR, "validation.parquet")
     full = Dataset.from_parquet(pq)
     rows = full.select(range(min(calib_n, len(full))))
