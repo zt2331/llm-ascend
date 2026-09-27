@@ -34,19 +34,42 @@ def _is_model_dir(p):
 
 
 def _hint_match(p):
-    """路径里是否像目标模型（qwen/27b 等，命中越多越优先）。"""
-    s = p.lower()
+    """路径匹配度打分（越高越优先）。
+
+    优先匹配 MODEL_NAME_HINT（默认 Qwen3.6-27B）；
+    同时给"已经转换/量化过的副本"扣分，避免选中 -fp16/-int4/-awq 之类目录。
+    """
+    s = p.lower().replace("\\", "/")
+    base = os.path.basename(p.rstrip("/")).lower()
     score = 0
-    for kw in ("qwen", "27b"):
-        if kw in s:
-            score += 1
-    if "config.json" in s:
-        score += 0
+
+    hint = MODEL_NAME_HINT.lower().replace("/", "-")
+    if hint and (hint in base or base in hint):
+        score += 5
+    if "qwen" in s:
+        score += 1
+    if "27b" in s:
+        score += 1
+
+    # 这些后缀说明不是原始 base 模型，扣分
+    for bad in ("-fp16", "-bf16", "-int4", "-int8", "-awq", "-gptq",
+                "-quant", "-w8a8", "-pruned", "-distill", "-merged", "-lora"):
+        if bad in base:
+            score -= 3
     return score
 
 
-def _walk_candidates(root, max_depth=3):
-    """在 root 下最多 max_depth 层找合法模型目录。"""
+def score_of(path):
+    """供外部（查找脚本）展示打分。"""
+    return _hint_match(path)
+
+
+def _walk_candidates(root, max_depth=5):
+    """在 root 下最多 max_depth 层找合法模型目录。
+
+    注意：深度判断只用于**停止继续下探**，不能跳过当前层的 config.json 检查
+    （否则最深层模型会被漏掉）。
+    """
     root = os.path.abspath(root)
     results = []
     if not os.path.isdir(root):
@@ -54,12 +77,13 @@ def _walk_candidates(root, max_depth=3):
     base_depth = root.rstrip("/").count("/")
     for dirpath, dirnames, filenames in os.walk(root):
         depth = dirpath.rstrip("/").count("/") - base_depth
-        if depth >= max_depth:
-            dirnames[:] = []
-            continue
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        # 先检查当前层（含最深层）
         if "config.json" in filenames:
             results.append(dirpath)
+        # 再决定是否继续下探
+        if depth >= max_depth:
+            dirnames[:] = []
     return results
 
 

@@ -36,8 +36,9 @@ def _print_candidate(i, c, mark=""):
         pass
     gb = _size_of(c)
     size = f"{gb:.1f} GB" if gb > 0 else "?"
+    score = config.score_of(c)
     print(f"  [{i}] {c}")
-    print(f"       权重 {size}   架构 {arch}{mark}")
+    print(f"       权重 {size}   架构 {arch}   匹配分 {score}{mark}")
 
 
 def deep_scan():
