@@ -106,27 +106,68 @@ def inspect(model_dir):
     else:
         print("\n[3] 没有 model.safetensors.index.json（单文件模型或索引缺失）")
 
-    # ---------- 4. 判定 ----------
-    actual_names = {os.path.basename(p) for p in actual}
+    # ---------- 4. 张量覆盖率（判断权重是否完整）----------
+    print("\n[4] 张量覆盖率（判断模型是否完整）")
+    cover = None
+    idx_map = {}
+    if idx_files:
+        try:
+            with open(idx_path, encoding="utf-8") as f:
+                idx_map = json.load(f).get("weight_map", {})
+        except Exception:
+            idx_map = {}
+        want = set(idx_map.keys())
+        have = set()
+        for p_ in actual:
+            have |= set(read_safetensors_keys(p_))
+        got = want & have
+        cover = (len(got), len(want))
+        pct = len(got) / max(len(want), 1) * 100
+        print(f"    索引声明张量 : {len(want)}")
+        print(f"    实际含有张量 : {len(got)}  ({pct:.1f}%)")
+        miss_t = sorted(want - have)
+        if miss_t:
+            print(f"    ❌ 缺失张量 {len(miss_t)} 个，例如:")
+            for t in miss_t[:6]:
+                print(f"        {t}")
+            print("       → 权重【不完整】，极可能是下载中断")
+            print("       → 此时重建索引很危险：能加载，但缺失层随机初始化 → 输出乱码")
+        else:
+            print("    ✅ 索引声明的张量全部存在（权重完整）")
+
+    # ---------- 5. 判定 ----------
+    actual_names = {os.path.basename(p_) for p_ in actual}
     missing = [f_ for f_ in (idx_files or []) if f_ not in actual_names]
-    print("\n[4] 结论")
-    if missing:
+    complete = bool(cover) and cover[0] == cover[1]
+    print("\n[5] 结论")
+    if cover and cover[0] != cover[1]:
+        print(f"    ❌❌ 模型权重不完整：{cover[0]}/{cover[1]} 个张量")
+        print(f"        缺 {len(missing)} 个分片: {missing[:6]}")
+        print("        → 【不要】用 --fix！先补齐权重文件（见末尾提示）")
+    elif missing:
         print(f"    ❌ 索引失效：引用了 {len(missing)} 个不存在的分片")
         print(f"       例如: {missing[:3]}")
         print("       → transformers 会直接 FileNotFoundError")
-        print("       → 修复: 运行本脚本加 --fix，生成 overlay 目录并重建索引")
+        print("       → 但张量齐全，可用 --fix 重建索引")
     elif idx_files:
-        print("    ✅ 索引与实际分片一致")
+        print("    ✅ 索引与实际分片一致，模型完整")
     else:
         print("    ℹ️ 无索引（transformers 会自行扫描所有分片）")
 
-    # ---------- 5. 精度判断 ----------
-    print("\n[5] 精度线索")
-    per_param = total / 1e9
-    print(f"    权重总量 ≈ {total / 1024**3:.2f} GiB")
-    print(f"    若为 27B 参数：约 {per_param * 1024**3 / 27e9:.2f} 字节/参数")
-    print("    （2.0=FP16/BF16, 1.0=FP8, 0.5=INT4）")
-    return {"actual": actual, "idx_files": idx_files, "missing": missing, "cfg": cfg}
+    # ---------- 6. 精度线索 ----------
+    print("\n[6] 精度线索")
+    n_layer = tc.get("num_hidden_layers") or 0
+    print(f"    层数 = {n_layer}, hidden = {tc.get('hidden_size')}")
+    print(f"    现有权重总量 ≈ {total / 1024**3:.2f} GiB（{len(actual)} 个分片）")
+    if idx_files and len(actual) < len(idx_files):
+        est = total * len(idx_files) / max(len(actual), 1)
+        print(f"    ⚠️ 索引要求 {len(idx_files)} 个分片 → 完整模型应约 {est / 1024**3:.1f} GiB")
+    print(f"    当前字节/参数 ≈ {total * 1024**3 / 27e9:.2f}（2.0=BF16, 1.0=FP8, 0.5=INT4）")
+    if cover and cover[0] != cover[1]:
+        print("    ⚠️ 权重不完整，该估算不可靠")
+
+    return {"actual": actual, "idx_files": idx_files, "missing": missing,
+            "cfg": cfg, "complete": complete, "cover": cover}
 
 
 def build_overlay(model_dir, out_dir):
@@ -138,6 +179,16 @@ def build_overlay(model_dir, out_dir):
 
     if not actual:
         print("\n[FAIL] 目录里没有权重文件，无法修复")
+        return None
+
+    # ★ 安全闸：权重不完整时拒绝重建索引（重建出来的模型能加载但输出乱码）
+    cover = info.get("cover")
+    if cover and cover[0] != cover[1]:
+        print("\n" + "!" * 78)
+        print("[拒绝执行] 模型权重不完整，重建索引会产出【能加载但输出乱码】的模型。")
+        print(f"           索引声明 {cover[1]} 个张量，实际只有 {cover[0]} 个。")
+        print("           请先补齐缺失的分片，再重新运行本脚本。")
+        print("!" * 78)
         return None
 
     os.makedirs(out_dir, exist_ok=True)
@@ -210,8 +261,21 @@ def main():
         return 1
 
     if not args.fix:
-        inspect(model_dir)
-        print("\n如需修复: python scripts/05_model_index_check.py --fix")
+        info = inspect(model_dir)
+        print("\n" + "-" * 78)
+        print("后续操作提示")
+        print("-" * 78)
+        cover = (info or {}).get("cover")
+        if cover and cover[0] != cover[1]:
+            print("模型权重不完整，请任选一种方式补齐：")
+            print("  1) 重新下载该模型（推荐，用 ModelScope / HuggingFace 官方仓库）")
+            print("       modelscope download --model <repo_id> --local_dir <目录>")
+            print("  2) 从环境里其它位置找一份完整副本（见下方检查命令）")
+            print("  3) 换用 shared_assets 里其它【完整】的模型跑本项目")
+            print("\n快速检查哪些模型是完整的：")
+            print("  python scripts/06_check_all_models.py")
+        else:
+            print("如需修复索引: python scripts/05_model_index_check.py --fix")
         return 0
 
     # 默认放到仓库外，避免污染 git 仓库
