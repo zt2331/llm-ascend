@@ -64,19 +64,31 @@ def _walk_candidates(root, max_depth=3):
 
 
 def _search_roots():
+    """返回要搜索的根目录列表（覆盖昇腾 ModelArts / Notebook 常见位置）。"""
     home = os.path.expanduser("~")
     roots = [
+        # 项目内
         os.path.join(PROJECT_ROOT, "qwen_model"),
         os.path.join(PROJECT_ROOT, "models"),
-        os.path.join(home, "work"),
-        os.path.join(home, "model"),
-        os.path.join(home, "models"),
+        # ★ 昇腾 Notebook/ModelArts 常见位置
+        "/workspace",
+        "/workspace/shared_assets",
+        "/workspace/models",
         "/home/ma-user/work",
         "/home/ma-user/modelarts/inputs",
         "/home/ma-user/modelarts/user-job-dir",
         "/home/ma-user/modelarts",
+        "/home/ma-user",
+        # 用户目录
+        os.path.join(home, "work"),
+        os.path.join(home, "model"),
+        os.path.join(home, "models"),
+        os.path.join(home, "data"),
+        # 其它常见挂载点
         "/cache",
         "/data",
+        "/models",
+        "/opt/models",
     ]
     return [r for r in roots if os.path.isdir(r)]
 
@@ -126,9 +138,23 @@ def resolve_model_path(verbose=False):
 
 
 MODEL_PATH = resolve_model_path()
-MODEL_TAG = os.environ.get("MODEL_TAG") or (
-    re.sub(r"[_ /:]+", "-", os.path.basename(MODEL_PATH)) if MODEL_PATH else MODEL_NAME_HINT
-)
+def _derive_tag(path):
+    """从模型路径推导出可读的 MODEL_TAG（避免 HF 缓存快照哈希当名字）。"""
+    if not path:
+        return MODEL_NAME_HINT
+    p = os.path.abspath(path)
+    # HuggingFace 缓存: .../models--Qwen--Qwen2.5-3B-Instruct/snapshots/<hash>
+    m = re.search(r"models--([^/]+)/snapshots/", p)
+    if m:
+        return m.group(1).replace("--", "-")
+    # ModelScope 缓存: .../hub/models/Qwen/Qwen2.5-3B-Instruct
+    m = re.search(r"/hub/(?:models/)?([^/]+)/([^/]+)$", p)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    return re.sub(r"[_ /:]+", "-", os.path.basename(p.rstrip("/")))
+
+
+MODEL_TAG = os.environ.get("MODEL_TAG") or _derive_tag(MODEL_PATH)
 
 
 def ensure_dirs():
