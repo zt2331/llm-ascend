@@ -11,8 +11,10 @@ data/校准语料
      │
      ├─[量化] quantize/                                          → 省显存/提速
      │     ├─ ascend_quant.py     昇腾原生 msModelSlim  W8A8  ★昇腾主力
-     │     ├─ w8a8_smooth.py      SmoothQuant + W8A8
-     │     ├─ gen_llmcomp.py      llm-compressor (W8A8/W4A16/GPTQ)
+     │     │                      （校准式 min/max，**不含平滑**）
+     │     ├─ w8a8_smooth.py      SmoothQuant + W8A8 ★平滑的唯一实现
+     │     ├─ gen_llmcomp.py      llm-compressor (AWQ/GPTQ/RTN/W8A16)
+     │     │                      --method smooth 会委托给 w8a8_smooth.py
      │     ├─ manual_awq.py       ★从零手写 AWQ（激活感知+缩放折叠+位序打包）
      │     └─ manual_gptq.py      ★从零手写 GPTQ（Hessian+逐列误差补偿）
      │
@@ -38,9 +40,9 @@ data/校准语料
 | `utils/model_utils.py` | 模型工具 | 文本 decoder 定位、多模态识别、量化 ignore 构造 |
 | `prune/prune.py` | 结构化剪枝 | **ShortGPT 块重要度** = 层输入/输出余弦相似度，删最高（最冗余）层 |
 | `distill/distill.py` | 蒸馏找回 | base = teacher，student 学 teacher 软 logits（KL），温度 T，乘 T² |
-| `quantize/ascend_quant.py` | **昇腾原生量化** | msModelSlim 的 W8A8（昇腾主力方案） |
-| `quantize/w8a8_smooth.py` | SmoothQuant W8A8 | 激活离群迁移到权重 `Y=(X/s)(W·s)ᵀ` |
-| `quantize/gen_llmcomp.py` | 调库量化 | llm-compressor `oneshot` + QuantizationModifier/GPTQModifier |
+| `quantize/ascend_quant.py` | **昇腾原生量化** | msModelSlim 的 W8A8（昇腾主力方案）。**只有 `w_bit/a_bit`+`Calibrator` 校准，无平滑/离群抑制** → 本质是「带校准的 RTN」 |
+| `quantize/w8a8_smooth.py` | SmoothQuant W8A8 | 激活离群迁移到权重 `Y=(X/s)(W·s)ᵀ`。**平滑的唯一实现**；`gen_llmcomp.py --method smooth` 委托到此 |
+| `quantize/gen_llmcomp.py` | 调库量化 | llm-compressor `oneshot` + QuantizationModifier/GPTQModifier，负责 AWQ/GPTQ/RTN |
 | `quantize/manual_awq.py` | **手写 AWQ** | 激活感知 + 逐通道缩放 + 缩放折叠 + AWQ_ORDER 打包 |
 | `quantize/manual_gptq.py` | **手写 GPTQ** | Hessian 二阶 + 逐列误差补偿 + GPTQ 布局打包 |
 | `eval/eval_ppl.py` | PPL | 左移对齐 cross-entropy，同口径可比 |

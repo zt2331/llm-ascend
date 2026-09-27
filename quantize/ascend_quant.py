@@ -1,6 +1,15 @@
 #!/usr/bin/env python
 """昇腾原生量化（msModelSlim / msmodelslim）—— 昇腾 NPU 推荐路径。
 
+★ 与 quantize/w8a8_smooth.py 的区别（两者都是 W8A8，但算法不同）：
+    本脚本  = msModelSlim 的【校准式 min/max 量化】，
+              只传 w_bit/a_bit 给 QuantConfig，**不含平滑/离群抑制**，
+              本质是“带激活校准的 RTN”。
+    w8a8_smooth.py = llm-compressor 的 SmoothQuant，
+              显式做了激活离群迁移 Y=(X/s)(W·s)ᵀ 后才是 INT8。
+  想比较“平滑到底带来多少增益”，要跑的是 w8a8_smooth.py vs
+  gen_llmcomp.py --method rtn --scheme W8A8（同一库、同一位宽，只差平滑）。
+
 为什么用 msModelSlim：
   昇腾硬件对 **W8A8(INT8)** 支持最成熟（Cube 单元对 INT8 有原生支持），
   而 NVIDIA 生态更常用 AWQ/GPTQ 的 INT4。国产卡量化应走昇腾自己的工具链，

@@ -16,10 +16,14 @@ SmoothQuant 原理：
     python quantize/w8a8_smooth.py --alpha 0.7 --calib 64 --seq 2048
     python quantize/w8a8_smooth.py --model output_models/pruned/xxx
 
-说明：本脚本是 **SmoothQuant 的专用入口**，等价于
-      `python quantize/gen_llmcomp.py --method smooth --scheme W8A8`
-      （后者把 SmoothQuant / AWQ / GPTQ / RTN 四种方法统一在一个入口里）。
-      两者产物内容一致，任选其一即可。
+说明：本脚本是 **SmoothQuant W8A8 的唯一实现**。
+      `python quantize/gen_llmcomp.py --method smooth` 会自动委托到本脚本
+      （后者是 AWQ/GPTQ/RTN/SmoothQuant 的统一入口，但 SmoothQuant 只在这里实现）。
+      两者产物内容与目录完全一致，任选其一。
+
+      ★ 注意与 `quantize/ascend_quant.py` 区分：那个走昇腾原生 msModelSlim，
+        是【校准式 min/max 量化】（本质是带校准的 RTN），**不含平滑**。
+        本脚本用的是 llm-compressor 的 SmoothQuantModifier，才有激活离群迁移。
 """
 import argparse
 import json

@@ -160,21 +160,13 @@ def build_recipe(method, scheme, group_size, ignore, alpha=0.75,
         raise RuntimeError(f"AWQModifier 构造失败（尝试 {len(plans)} 种签名）: {last}")
 
     # ---------------- SmoothQuant（平滑量化）----------------
+    # ★ 不再在此处实现：SmoothQuant W8A8 的唯一实现是 quantize/w8a8_smooth.py，
+    #   main() 遇到 --method smooth 会直接委托过去。保留两份等价实现会导致
+    #   “同一算法两个入口、默认参数不同、输出目录同名互相覆盖”。
     if method == "smooth":
-        from llmcompressor.modifiers.transform.smoothquant import SmoothQuantModifier
-        last = None
-        for kwargs in (dict(smoothing_strength=alpha), dict()):
-            try:
-                sq = SmoothQuantModifier(**kwargs)
-                mods = [sq, QuantizationModifier(targets=["Linear"],
-                                                 scheme=scheme, ignore=ignore)]
-                print(f"  [recipe] SmoothQuantModifier(smoothing_strength="
-                      f"{kwargs.get('smoothing_strength', '默认')}) + "
-                      f"QuantizationModifier({scheme})")
-                return mods
-            except Exception as e:
-                last = e
-        raise RuntimeError(f"SmoothQuantModifier 构造失败: {last}")
+        raise RuntimeError(
+            "method='smooth' 不再由本文件实现，请使用 quantize/w8a8_smooth.py"
+            "（main() 会自动委托，正常命令行调用不会走到这里）")
 
     # ---------------- RTN 基线 ----------------
     print(f"  [recipe] QuantizationModifier(scheme={scheme})  [RTN 基线]")
@@ -185,8 +177,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None, help="待量化模型目录（默认 base）")
     ap.add_argument("--method", default="awq", choices=["smooth", "awq", "gptq", "rtn"],
-                    help="smooth(平滑量化 SmoothQuant) / awq(激活感知) / "
-                         "gptq(二阶误差补偿) / rtn(朴素基线)")
+                    help="smooth(平滑量化 SmoothQuant，委托给 w8a8_smooth.py) / "
+                         "awq(激活感知) / gptq(二阶误差补偿) / rtn(朴素基线)")
     ap.add_argument("--alpha", type=float, default=0.75,
                     help="SmoothQuant 迁移强度 0~1（越大越把量化难度给权重）")
     ap.add_argument("--awq-n-grid", type=int, default=20,
@@ -199,17 +191,48 @@ def main():
     ap.add_argument("--scheme", default=None, help="显式指定 scheme；不填按 method+bits 推断")
     ap.add_argument("--bits", type=int, default=4, help="位宽（awq/gptq 默认 4）")
     ap.add_argument("--group-size", type=int, default=128)
-    ap.add_argument("--calib", type=int, default=32)
-    ap.add_argument("--seq", type=int, default=512)
+    ap.add_argument("--calib", type=int, default=None,
+                    help="校准条数（smooth 默认 64，其余 32；与各自专用入口保持一致）")
+    ap.add_argument("--seq", type=int, default=None,
+                    help="校准序列长度（smooth 默认 2048，其余 512）")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
     config.ensure_dirs()
     model_path = os.path.abspath(args.model) if args.model else config.require_model()
 
+    # 校准参数：smooth 与 w8a8_smooth.py 对齐，其余方法沿用原默认值
+    if args.calib is None:
+        args.calib = 64 if args.method == "smooth" else 32
+    if args.seq is None:
+        args.seq = 2048 if args.method == "smooth" else 512
+
+    # ★ SmoothQuant W8A8 的【唯一实现】是 quantize/w8a8_smooth.py。
+    #   这里直接委托过去：此前本文件里有一份等价但【默认参数不同】的副本，
+    #   且两者输出目录名完全相同（<stem>-llmcomp-smooth-W8A8），
+    #   先后运行会静默互相覆盖，导致结果无法复现。委托后只有一个代码路径。
+    if args.method == "smooth":
+        # 委托时把 --scheme 原样透传（w8a8_smooth.py 支持 W8A8 / W8A16）
+        s_scheme = args.scheme or "W8A8"
+        if s_scheme not in ("W8A8", "W8A16"):
+            print(f"[FAIL] --method smooth 只支持 --scheme W8A8|W8A16，收到 {s_scheme}")
+            return 2
+        print(f"[INFO] --method smooth 委托给 quantize/w8a8_smooth.py"
+              f"（SmoothQuant {s_scheme} 的唯一实现）")
+        print(f"       注：--scheme 仅支持 W8A8/W8A16（SmoothQuant 是激活量化，"
+              f"INT4 权重不在该路径内）", flush=True)
+        cmd = [sys.executable,
+               os.path.join(config.PROJECT_ROOT, "quantize", "w8a8_smooth.py"),
+               "--model", model_path, "--alpha", str(args.alpha),
+               "--scheme", s_scheme, "--calib", str(args.calib), "--seq", str(args.seq)]
+        if args.out:
+            cmd += ["--out", args.out]
+        import subprocess
+        return subprocess.call(cmd)
+
     if args.scheme:
         scheme = args.scheme
-    elif args.method in ("rtn", "smooth"):
+    elif args.method == "rtn":
         scheme = "W8A8"
     else:
         scheme = "W4A16" if args.bits == 4 else "W8A16"
