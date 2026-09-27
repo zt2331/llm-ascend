@@ -217,3 +217,80 @@ A: 先用小参数验证流程：`KEEP=40 CALIB=8 SEQ=256 SKIP_DISTILL=1 bash sc
 3. **量化作用域**：只量化标准 Linear；视觉塔 / 混合线性注意力 / lm_head 保持高精度。
 4. **推理性能**：decode（访存密集）vs prefill（计算密集）、吞吐-延迟权衡、并发压测。
 5. **工程化**：一键流水线、结果自动出表出图、环境自检与降级策略。
+
+---
+
+## 九、代码托管：推送到远程仓库（Git）
+
+仓库已初始化（分支 `main`），`.gitignore` 已排除权重/产物/数据，
+`.gitattributes` 强制文本文件用 **LF** 换行（关键：`.sh` 带 CRLF 在 Linux 上会报
+`bash: $'\r': command not found`）。
+
+### 9.1 在本地推送到远程
+
+**① 先在 Gitee/GitHub 上新建一个空仓库**（不要勾选"初始化 README"，保持空仓库）
+- Gitee：https://gitee.com/projects/new
+- GitHub：https://github.com/new
+
+**② 关联远程并推送**
+
+```bash
+cd llm_ascend
+
+# Gitee（国内快，推荐）
+git remote add origin https://gitee.com/<你的用户名>/llm_ascend.git
+
+# 或 GitHub
+# git remote add origin https://github.com/<你的用户名>/llm_ascend.git
+
+git push -u origin main
+```
+
+> 若仓库是**私有**的，推送时会要求账号密码 —— Gitee/GitHub 都需要用
+> **访问令牌（Token）** 代替密码，不是登录密码。
+> Gitee: 设置 → 私人令牌；GitHub: Settings → Developer settings → Personal access tokens。
+
+### 9.2 在昇腾开发环境拉取
+
+```bash
+# 联网环境下
+cd ~/work            # 或你的工作目录
+git clone https://gitee.com/<你的用户名>/llm_ascend.git
+cd llm_ascend
+
+# 之后更新
+git pull
+```
+
+**拉取后先做两件事**：
+
+```bash
+# ① 确认脚本换行符正确（应为 LF）
+file scripts/*.sh | grep -i crlf && echo "有 CRLF，需修复" || echo "换行符 OK"
+
+# 若真的出现 CRLF（少数情况），一键修复：
+#   sed -i 's/\r$//' scripts/*.sh
+
+# ② 环境自检
+python scripts/02_check_env.py
+```
+
+### 9.3 常见问题
+
+| 问题 | 解决 |
+|---|---|
+| `bash: $'\r': command not found` | 脚本是 CRLF：`sed -i 's/\r$//' scripts/*.sh` |
+| `Permission denied (publickey)` | 用 HTTPS + Token，或配置 SSH key |
+| `src refspec main does not match any` | 先 `git add -A && git commit -m init` |
+| `remote origin already exists` | `git remote set-url origin <新地址>` |
+| 推送很慢/超时 | 改用 Gitee；或 `git config --global http.postBuffer 524288000` |
+
+### 9.4 可选：把真实结果也纳入版本管理
+
+默认 `output_models/` 被忽略（产物不入库）。若想把**实测报告**提交上去作为证据：
+
+```bash
+git add -f output_models/results/REPORT.md output_models/results/*.png
+git commit -m "docs: 加入实测实验结果报告与图表"
+git push
+```
