@@ -171,7 +171,7 @@ def main():
         scheme = "W4A16" if args.bits == 4 else "W8A16"
 
     stem = os.path.basename(os.path.normpath(model_path))
-    out_dir = args.out or os.path.join(config.QUANT_DIR, f"{stem}-{args.method}-{scheme}")
+    out_dir = args.out or os.path.join(config.QUANT_DIR, f"{stem}-llmcomp-{args.method}-{scheme}")
 
     print("=" * 74)
     print(f"llm-compressor 量化   method={args.method}   scheme={scheme}")

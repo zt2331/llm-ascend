@@ -143,7 +143,7 @@ def main():
     config.ensure_dirs()
     model_path = os.path.abspath(args.model) if args.model else config.require_model()
     stem = os.path.basename(os.path.normpath(model_path))
-    out_dir = args.out or os.path.join(config.QUANT_DIR, f"{stem}-ascend-{args.scheme}")
+    out_dir = args.out or os.path.join(config.QUANT_DIR, f"{stem}-msmodelslim-{args.scheme}")
 
     print("=" * 72)
     print(f"昇腾原生量化 (msModelSlim)  scheme={args.scheme}")

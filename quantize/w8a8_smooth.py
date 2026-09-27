@@ -58,7 +58,7 @@ def main():
     config.ensure_dirs()
     model_path = os.path.abspath(args.model) if args.model else config.require_model()
     stem = os.path.basename(os.path.normpath(model_path))
-    out_dir = args.out or os.path.join(config.QUANT_DIR, f"{stem}-smooth-{args.scheme}")
+    out_dir = args.out or os.path.join(config.QUANT_DIR, f"{stem}-llmcomp-smooth-{args.scheme}")
 
     print("=" * 72)
     print(f"SmoothQuant {args.scheme}   alpha={args.alpha}")

@@ -244,7 +244,7 @@ def main():
     config.ensure_dirs()
     model_path = os.path.abspath(args.model) if args.model else config.require_model()
     stem = os.path.basename(os.path.normpath(model_path))
-    out_dir = os.path.join(config.QUANT_DIR, f"{stem}-manualGPTQ-{args.bits}bit")
+    out_dir = os.path.join(config.QUANT_DIR, f"{stem}-manual-gptq-{args.bits}bit")
 
     print("=" * 72)
     print(f"手写 GPTQ 量化 (bits={args.bits}, group={args.group_size}, "

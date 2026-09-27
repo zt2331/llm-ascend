@@ -105,6 +105,49 @@ data/校准语料
 
 ---
 
+## 3.5 量化库的两条路线：通用库 vs 厂商原生库（★国产卡适配关键）
+
+本项目**同一模型用两套库各量化一遍**，这是国产卡适配岗最想看的对比。
+
+| | **llm-compressor** | **msModelSlim** |
+|---|---|---|
+| 出身 | vLLM 社区（通用开源） | **华为昇腾官方** |
+| 入口脚本 | `quantize/gen_llmcomp.py`（AWQ/GPTQ/RTN）<br>`quantize/w8a8_smooth.py`（SmoothQuant W8A8） | `quantize/ascend_quant.py` |
+| 产物目录 | `<模型>-llmcomp-<method>-<scheme>` | `<模型>-msmodelslim-<scheme>` |
+| 产物格式 | compressed-tensors | 昇腾原生量化格式 |
+| 后端 | 通用 PyTorch 算子（昇腾上可能 fallback CPU） | 面向达芬奇 Cube 单元（INT8 原生支持） |
+| 部署引擎 | vLLM / vllm-ascend | MindIE / vllm-ascend |
+| 算法覆盖 | RTN / AWQ / GPTQ / SmoothQuant | 昇腾官方量化流程（W8A8 为主） |
+
+### 为什么要两条都做
+
+1. **技术选型由硬件决定**：昇腾 Cube 对 INT8 有原生支持 → **W8A8 是昇腾主力**；
+   NVIDIA 生态里 AWQ/GPTQ 的 INT4 更普遍。同模型迁移时量化方案要跟着换。
+2. **通用库的兼容性风险**：llm-compressor 走通用算子，在昇腾上可能某些算子
+   没有 NPU 实现而 fallback 到 CPU，性能断崖。
+3. **厂商原生库的优势**：msModelSlim 针对昇腾硬件调优，且产出的模型
+   能被 MindIE / vllm-ascend 最稳地加载。
+4. **面试价值**：能讲清"同一模型在两套工具链上的差异与取舍"，
+   比只会用一套库有说服力得多。
+
+### 本项目 7 条量化路径一览
+
+| 路径 | 脚本 | 库 | 说明 |
+|---|---|---|---|
+| 昇腾原生 W8A8 | `ascend_quant.py` | **msModelSlim** | 华为官方，昇腾主力 |
+| SmoothQuant W8A8 | `w8a8_smooth.py` | llm-compressor | 激活离群迁移，通用库 |
+| AWQ 4bit | `gen_llmcomp.py --method awq` | llm-compressor | `AWQModifier + QuantizationModifier` |
+| GPTQ 4bit | `gen_llmcomp.py --method gptq` | llm-compressor | Hessian 二阶补偿 |
+| RTN 基线 | `gen_llmcomp.py --method rtn` | llm-compressor | 朴素量化，对照用 |
+| 手写 AWQ | `manual_awq.py` | **纯 PyTorch** | 展示算法实现细节 |
+| 手写 GPTQ | `manual_gptq.py` | **纯 PyTorch** | Hessian + 逐列补偿 |
+
+> ⚠️ **ignore 正则必须带 `re:` 前缀**（如 `"re:.*linear_attn.*"`），
+> 否则按字面精确匹配、静默失效 —— 本项目踩过此坑，
+> 导致 linear_attn 被误量化、vLLM 加载后输出异常。
+
+---
+
 ## 4. 昇腾适配要点
 
 ### 4.1 设备抽象层（`utils/device.py`）
