@@ -123,7 +123,7 @@ def ppl_hf(model_path, tok, texts, seq, stride, prefer_device):
 # 后端 B：vLLM（量化模型推荐；保持量化精度，显存占用低）
 # ----------------------------------------------------------------------
 def ppl_vllm(model_path, tok, texts, seq, quant, gpu_util, prefer_device,
-             dtype="bfloat16", max_num_seqs=8):
+             dtype="bfloat16", max_num_seqs=8, language_model_only=False):
     """★ dtype 必须用 bfloat16：
     Qwen3.6 原生 dtype 就是 bfloat16；若强制 float16，量化产物的 weight_scale
     会变成 fp16，而昇腾 aclnnQuantMatmulWeightNz 只接受
@@ -136,10 +136,26 @@ def ppl_vllm(model_path, tok, texts, seq, quant, gpu_util, prefer_device,
     #   每个 decode 序列占一个 Mamba cache block；默认 256 会超过可用块数，
     #   报 "max_num_seqs (256) exceeds available Mamba cache blocks (196)"。
     #   PPL 评测每次只跑 1 条，给 8 足够。
-    llm = LLM(model=model_path, dtype=dtype, trust_remote_code=True,
-              max_model_len=max(seq, 512), gpu_memory_utilization=gpu_util,
-              max_num_seqs=max_num_seqs,
-              disable_log_stats=True, **kw)
+    extra = {}
+    if language_model_only:
+        # 官方参数：跳过视觉编码器与多模态 profiling，省显存给 KV cache。
+        # 27B fp16 权重约 54GB，61GB 卡上很紧，评测 base 时建议开。
+        extra["language_model_only"] = True
+    try:
+        llm = LLM(model=model_path, dtype=dtype, trust_remote_code=True,
+                  max_model_len=max(seq, 512), gpu_memory_utilization=gpu_util,
+                  max_num_seqs=max_num_seqs,
+                  disable_log_stats=True, **extra, **kw)
+    except TypeError as e:
+        if extra:
+            print(f"    [INFO] language_model_only 不支持({str(e)[:60]})，改用普通加载")
+            extra = {}
+            llm = LLM(model=model_path, dtype=dtype, trust_remote_code=True,
+                      max_model_len=max(seq, 512), gpu_memory_utilization=gpu_util,
+                      max_num_seqs=max_num_seqs,
+                      disable_log_stats=True, **kw)
+        else:
+            raise
     # prompt_logprobs=0 → 返回每个 prompt 位置真实 token 的对数概率
     sp = SamplingParams(max_tokens=1, temperature=0, prompt_logprobs=0)
 
@@ -192,7 +208,8 @@ def run_one(path, tok, texts, args, prefer_device):
     if backend == "vllm":
         try:
             return ppl_vllm(path, tok, texts, args.seq, quant, args.gpu_util,
-                            prefer_device, args.vllm_dtype, args.max_num_seqs)
+                            prefer_device, args.vllm_dtype, args.max_num_seqs,
+                            args.language_model_only)
         except Exception as e:
             print(f"    [WARN] vLLM 失败({type(e).__name__}: {str(e)[:120]})，回退 transformers")
     return ppl_hf(path, tok, texts, args.seq, args.stride, prefer_device)
@@ -211,6 +228,9 @@ def main():
     ap.add_argument("--max-num-seqs", type=int, default=8,
                     help="vLLM 最大并发序列数。Mamba 混合架构（Qwen3.6）每个序列占一个 "
                          "Mamba cache block，默认 256 会超出可用块数而报错；PPL 只需 8")
+    ap.add_argument("--language-model-only", action="store_true",
+                    help="vLLM 官方参数：跳过视觉编码器与多模态 profiling，"
+                         "省显存给 KV cache。评测 base（fp16 约 54GB）时建议开")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 
