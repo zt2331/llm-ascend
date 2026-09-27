@@ -76,32 +76,44 @@ python scripts/02_check_env.py
 ### 2.1 可选：装 Miniconda 建独立环境（练习用）
 
 > 目的是**练习"像在 CUDA 上一样熟练地搭国产环境"**，不是跑通的必要条件。
-> 如果新环境装不上 torch_npu，脚本会提示**回退方案**（直接用镜像环境）。
+> 📖 **完整详细步骤见 `docs/CONDA_SETUP.md`**（含检查点、报错速查、保底方案）。
+>
+> ⚠️ 最大风险在 `torch_npu`：它与系统 CANN 版本**强绑定**，新环境里必须装
+> **同一版本**。`01c_conda_setup.sh` 会自动探测镜像自带版本并对齐，
+> 失败时自动降级为「继承系统包」的保底方案。
+
+**方式一：一键脚本（推荐）**
 
 ```bash
 cd llm-ascend
-
-# ① 装 Miniconda（自动识别 ARM64/x86_64，用清华镜像）
-bash scripts/00_install_miniconda.sh
-
-# ② 让 conda 在当前 shell 生效
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
-conda --version
-
-# ③ 建环境并安装昇腾栈（torch / torch_npu / vllm / vllm-ascend 版本已对齐镜像）
-bash scripts/01_create_env.sh
-conda activate ascend
-
-# ④ 自检（必做！确认 NPU 可用）
-python scripts/02_check_env.py
+bash scripts/01c_conda_setup.sh     # 装 Miniconda + 建环境 + 装昇腾栈 + 验证
 ```
 
-**若第 ③ 步在新环境里 torch_npu 装不上**，用回退方案（复用镜像自带环境）：
+**方式二：按文档手动一步步来** → 见 `docs/CONDA_SETUP.md`
+
+粗略流程：
 
 ```bash
-REUSE_BASE=1 bash scripts/01_create_env.sh
+# ① 装 Miniconda（自动识别 ARM64/x86_64，用清华镜像）
+bash scripts/00_install_miniconda.sh
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+
+# ② 建环境（Python 必须与镜像一致：3.12）
+conda create -n ascend python=3.12 -y
+conda activate ascend
+
+# ③ 装昇腾栈（版本要探测镜像自带值并对齐）
+pip install torch==2.10.0 torch-npu==2.10.0.post4 -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install vllm==0.23.0 vllm-ascend==0.23.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# ④ 项目依赖 + 验证
+pip install pyarrow matplotlib tqdm -i https://pypi.tuna.tsinghua.edu.cn/simple
 python scripts/02_check_env.py
 ```
+
+**若在新环境里 torch_npu 装不上 / NPU 不可用**，两个保底方案（详见 `docs/CONDA_SETUP.md`）：
+1. **继承系统包**：用 `.pth` 把镜像自带的 site-packages 挂进 conda 环境（零风险）
+2. **直接用镜像自带 Python**：不激活 conda，直接跑（5 分钟跑通）
 
 ---
 
@@ -188,6 +200,7 @@ llm_ascend/
 │   ├── 00_install_miniconda.sh    # 可选：装 Miniconda
 │   ├── 01_create_env.sh           # 可选：建 conda 环境
 │   ├── 01b_install_deps.sh        # ★ 不用 conda，直接补依赖
+│   ├── 01c_conda_setup.sh         # ★ 一键 conda 建环境（自动对齐版本+保底）
 │   ├── 02_check_env.py        # 环境自检（版本/设备/算子/CANN）
 │   ├── 03_find_model.py
 │   ├── 04_prepare_data.py     # 数据准备（parquet > 本地语料 > 联网 > 内置兜底）
@@ -199,7 +212,8 @@ llm_ascend/
 │   └── prometheus.yaml        # vLLM 指标 + NPU 硬件指标采集
 └── docs/
     ├── ARCHITECTURE.md        # ★ 架构与算法细节（含手写 AWQ/GPTQ 推导）
-    └── ASCEND_MIGRATION.md    # ★ CUDA→CANN 迁移差异（面试弹药）
+    ├── ASCEND_MIGRATION.md    # ★ CUDA→CANN 迁移差异（面试弹药）
+    └── CONDA_SETUP.md         # ★ Miniconda + 手动建环境详细步骤
 ```
 
 ---
