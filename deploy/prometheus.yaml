@@ -1,0 +1,62 @@
+# Prometheus 采集 —— 昇腾 NPU Serving 版
+#
+# 与 NVIDIA 版的差异：
+#   - 除了 vLLM 指标，还要采集 **NPU 指标**（昇腾用 npu-smi / Ascend Device Plugin
+#     暴露的指标，或 node-exporter + npu-exporter）
+#   - NVIDIA 用 DCGM Exporter；昇腾用 **npu-exporter**（或 ascendsmi-exporter）
+#
+# 用法: prometheus --config.file=deploy/prometheus.yaml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # ---------- vLLM（昇腾上由 vllm-ascend 暴露 /metrics）----------
+  - job_name: vllm-serving
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8000"]        # 本机；k8s 换成 Service DNS: llm-serving-ascend:8000
+    # 有鉴权时: bearer_token_file: /etc/prom/token
+
+  # ---------- 昇腾 NPU 硬件指标 ----------
+  # 需先部署 npu-exporter（昇腾社区提供），默认端口按实际调整
+  - job_name: ascend-npu
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8082"]        # npu-exporter 默认端口，按实际改
+
+  # ---------- 节点级（CPU/内存/网络）----------
+  - job_name: node
+    static_configs:
+      - targets: ["127.0.0.1:9100"]        # node-exporter
+
+# ============================================================
+# 核心指标速查
+# ------------------------------------------------------------
+# 【vLLM / 服务层】
+#   vllm:num_requests_running           正在处理的请求数
+#   vllm:num_requests_waiting           排队请求数  → 判断是否饱和，决定扩容
+#   vllm:num_requests_finished          已完成请求数 → 吞吐
+#   vllm:prompt_tokens_total            输入 token 量
+#   vllm:generation_tokens_total        输出 token 量 → decode 吞吐
+#   vllm:time_to_first_token_seconds    首 token 延迟直方图 → TTFT p50/p95
+#   vllm:time_per_output_token_seconds  每输出 token 延迟 → TPOT
+#   vllm:gpu_cache_usage_perc           KV cache 占用率 → 决定显存/KV 配置
+#
+# 【昇腾 NPU 硬件层】(指标名以 npu-exporter 实际暴露为准)
+#   npu_chip_info                        芯片型号/数量
+#   npu_utilization / aicore_utilization AI Core 利用率 → 对应 GPU SM 利用率
+#   npu_hbm_used / npu_hbm_total         HBM 显存占用
+#   npu_temperature                     芯片温度 → 降频预警
+#   npu_power                            功耗
+#
+# ============================================================
+# 关键结论（面试可讲）
+# ------------------------------------------------------------
+#  1. 4-bit 权重使 decode 阶段访存量下降 → decode 吞吐提升（bandwidth-bound）；
+#     但 prefill 是计算密集型，低位宽收益有限，长输入 TTFT 可能不占优。
+#  2. 昇腾侧 W8A8 是主力：Cube 单元原生支持 INT8；INT4 支持面窄。
+#  3. `num_requests_waiting` 持续 >0 说明已达吞吐上限 → 扩容或限流。
+#  4. `gpu_cache_usage_perc` 接近 100% → KV cache 不足，需降 max-model-len
+#     或提高显存利用率 / 增加卡数（张量并行）。

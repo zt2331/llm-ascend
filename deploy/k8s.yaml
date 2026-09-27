@@ -1,0 +1,101 @@
+# LLM Serving 生产部署清单（K8s）—— 昇腾 NPU 版
+#
+# 与 NVIDIA 版的差异：
+#   - GPU 资源名: nvidia.com/gpu        →  huawei.com/Ascend910（训练/推理卡）
+#                 推理卡 Atlas 300I Duo 用 huawei.com/Ascend310P
+#   - 需要挂载昇腾驱动与固件: /usr/local/Ascend/driver + /usr/local/Ascend/firmware
+#   - 通常需 hostNetwork 或 privileged 才能访问 NPU 设备
+#   - 镜像换为昇腾版 vLLM 镜像（如 vllm-ascend 官方镜像）
+#
+# 用法: kubectl apply -f deploy/k8s.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-serving-ascend
+  labels: {app: llm-serving-ascend}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llm-serving-ascend}}
+  template:
+    metadata:
+      labels: {app: llm-serving-ascend}
+    spec:
+      # 昇腾容器通常需要特权模式才能访问设备
+      hostNetwork: true
+      containers:
+      - name: serving
+        # 换成你的昇腾 vLLM 镜像（含 vllm-ascend + CANN）
+        image: your-registry/vllm-ascend:0.23.0
+        command: ["/bin/bash", "-lc"]
+        args:
+          - >
+            source /usr/local/Ascend/ascend-toolkit/set_env.sh &&
+            export ASCEND_RT_VISIBLE_DEVICES=0 &&
+            vllm serve /model
+            --host 0.0.0.0 --port 8000
+            --trust-remote-code --dtype float16
+            --max-model-len 4096
+            --gpu-memory-utilization 0.90
+            --quantization compressed-tensors
+            --served-model-name qwen
+        env:
+        - {name: ASCEND_RT_VISIBLE_DEVICES, value: "0"}
+        - {name: VLLM_USE_V1, value: "1"}
+        ports: [{containerPort: 8000}]
+        resources:
+          limits:
+            # ★ 昇腾 NPU 资源名（按你的集群 device-plugin 实际名称调整）
+            huawei.com/Ascend910: "1"
+            # 推理卡示例: huawei.com/Ascend310P: "1"
+          requests:
+            huawei.com/Ascend910: "1"
+        readinessProbe:
+          httpGet: {path: /v1/models, port: 8000}
+          initialDelaySeconds: 120      # 昇腾首编译较慢，探针要给足时间
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet: {path: /v1/models, port: 8000}
+          initialDelaySeconds: 300
+          periodSeconds: 30
+        volumeMounts:
+        - {name: model, mountPath: /model}
+        - {name: shm, mountPath: /dev/shm}
+        - {name: ascend-driver, mountPath: /usr/local/Ascend/driver}
+        - {name: ascend-firmware, mountPath: /usr/local/Ascend/firmware}
+      volumes:
+      - name: model
+        hostPath:
+          # 宿主机上的量化模型目录
+          path: /data/models/qwen-ascend-W8A8
+      - name: shm
+        emptyDir: {medium: Memory, sizeLimit: "8Gi"}
+      - name: ascend-driver
+        hostPath: {path: /usr/local/Ascend/driver}
+      - name: ascend-firmware
+        hostPath: {path: /usr/local/Ascend/firmware}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-serving-ascend}
+spec:
+  type: ClusterIP
+  selector: {app: llm-serving-ascend}
+  ports: [{name: http, port: 8000, targetPort: 8000}]
+---
+# HPA：按 CPU 或自定义指标（如 vLLM 排队数）水平扩缩容
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: llm-serving-ascend}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: llm-serving-ascend
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target: {type: Utilization, averageUtilization: 70}

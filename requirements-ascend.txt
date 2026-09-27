@@ -1,0 +1,34 @@
+# 昇腾 NPU 环境依赖（版本已与镜像 vLLM-Ascend 0.23.0 对齐）
+# 安装: pip install -r requirements-ascend.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+#
+# ⚠️ 版本强绑定：CANN ↔ torch_npu ↔ torch ↔ vLLM ↔ vllm-ascend
+#    任一不匹配都可能导致启动失败，请先核对官方兼容矩阵。
+
+# ---- 昇腾核心栈（镜像自带版本）----
+torch==2.10.0
+torch-npu==2.10.0.post4
+vllm==0.23.0
+vllm-ascend==0.23.0
+triton-ascend==3.2.2
+
+# ---- 模型 / 数据处理 ----
+transformers
+datasets
+accelerate
+safetensors
+sentencepiece
+huggingface_hub
+tokenizers
+
+# ---- 项目运行必需 ----
+pandas
+pyarrow
+numpy
+tqdm
+matplotlib
+
+# ---- 可选：llm-compressor 量化路径（昇腾主路径用 msModelSlim）----
+# llmcompressor
+
+# ---- 可选：标准四基准评测 ----
+# lm-eval

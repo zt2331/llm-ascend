@@ -1,0 +1,21 @@
+# 统一换行符为 LF —— 关键！
+# Windows 上编辑过的 .sh 若带 CRLF，在 Linux(昇腾) 上执行会报
+#   bash: $'\r': command not found
+# 因此这里强制文本文件用 LF 存进仓库。
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.cfg   text eol=lf
+
+# 二进制文件不做换行转换
+*.png     binary
+*.jpg     binary
+*.parquet binary
+*.safetensors binary
+*.bin     binary

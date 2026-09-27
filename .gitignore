@@ -1,0 +1,57 @@
+# ---------- 运行产物（不提交，跑脚本自动生成）----------
+output_models/*
+!output_models/.gitkeep
+
+# ---------- 数据（跑 scripts/04_prepare_data.py 自动生成）----------
+data/calib/*.parquet
+data/test/*.parquet
+data/raw/*.parquet
+
+# ---------- 模型权重（体积大，绝不提交）----------
+qwen_model/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf
+*.onnx
+*.h5
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# ---------- 虚拟环境 ----------
+venv/
+.venv/
+env/
+ENV/
+miniconda3/
+
+# ---------- 日志 ----------
+*.log
+logs/
+
+# ---------- 编辑器 / 系统 ----------
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# ---------- 敏感信息 ----------
+*.pem
+*.key
+.env
+token.txt
