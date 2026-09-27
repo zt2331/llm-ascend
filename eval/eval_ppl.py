@@ -141,9 +141,15 @@ def ppl_vllm(model_path, tok, texts, seq, quant, gpu_util, prefer_device,
         # 官方参数：跳过视觉编码器与多模态 profiling，省显存给 KV cache。
         # 27B fp16 权重约 54GB，61GB 卡上很紧，评测 base 时建议开。
         extra["language_model_only"] = True
+    # ★ max_model_len 必须 > 输入长度：prompt 本身 seq 个 token，
+    #   SamplingParams 还要求至少生成 1 个 token；
+    #   若 max_model_len == seq 会报
+    #   "The decoder prompt (length 512) plus the number of requested output tokens
+    #    (at least 1) exceeds the maximum model length of 512"
+    max_len = max(seq + 32, 256)
     try:
         llm = LLM(model=model_path, dtype=dtype, trust_remote_code=True,
-                  max_model_len=max(seq, 512), gpu_memory_utilization=gpu_util,
+                  max_model_len=max_len, gpu_memory_utilization=gpu_util,
                   max_num_seqs=max_num_seqs,
                   disable_log_stats=True, **extra, **kw)
     except TypeError as e:
@@ -151,7 +157,7 @@ def ppl_vllm(model_path, tok, texts, seq, quant, gpu_util, prefer_device,
             print(f"    [INFO] language_model_only 不支持({str(e)[:60]})，改用普通加载")
             extra = {}
             llm = LLM(model=model_path, dtype=dtype, trust_remote_code=True,
-                      max_model_len=max(seq, 512), gpu_memory_utilization=gpu_util,
+                      max_model_len=max_len, gpu_memory_utilization=gpu_util,
                       max_num_seqs=max_num_seqs,
                       disable_log_stats=True, **kw)
         else:
@@ -160,20 +166,31 @@ def ppl_vllm(model_path, tok, texts, seq, quant, gpu_util, prefer_device,
     sp = SamplingParams(max_tokens=1, temperature=0, prompt_logprobs=0)
 
     total_logp, n_tok = 0.0, 0
+    warned = False
     for t in texts:
         ids = tok(t, add_special_tokens=False)["input_ids"][:seq]
         if len(ids) < 16:
             continue
-        try:
-            out = llm.generate([{"prompt_token_ids": ids}], sp, use_tqdm=False)
-        except Exception as e:
-            print(f"      [WARN] 单条样本失败: {str(e)[:80]}")
+        out = None
+        for cut in (len(ids), len(ids) - 64, len(ids) - 128):
+            if cut < 16:
+                break
+            try:
+                out = llm.generate([{"prompt_token_ids": ids[:cut]}], sp, use_tqdm=False)
+                break
+            except Exception as e:
+                if not warned:
+                    print(f"      [WARN] 首条样本失败，尝试截断重试: {str(e)[:90]}")
+                    warned = True
+                continue
+        if out is None:
             continue
         plps = getattr(out[0], "prompt_logprobs", None)
         if not plps:
             continue
+        used = min(len(ids), len(plps))
         for pos, d in enumerate(plps):
-            if not d or pos >= len(ids):
+            if not d or pos >= used:
                 continue
             tid = ids[pos]
             lp = d[tid].logprob if tid in d else next(iter(d.values())).logprob
@@ -219,7 +236,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None)
     ap.add_argument("--backend", default="auto", choices=["auto", "hf", "vllm"])
-    ap.add_argument("--seq", type=int, default=512, help="评测序列长度（27B 建议 ≤512）")
+    ap.add_argument("--seq", type=int, default=512,
+                    help="评测序列长度（27B 建议 ≤512）。程序会用 seq+32 作为 "
+                         "max_model_len，避免 prompt 长度与输出 token 冲突")
     ap.add_argument("--stride", type=int, default=512)
     ap.add_argument("--max-texts", type=int, default=64)
     ap.add_argument("--gpu-util", type=float, default=0.90)
