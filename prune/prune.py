@@ -75,14 +75,48 @@ def prune_and_save(model_path, sims, keep, out_dir, tok, prefer_device):
     dec.layers = nn.ModuleList([dec.layers[i] for i in keep_idx])
 
     cfg = getattr(dec, "config", None) or getattr(model, "config", None)
-    cfg.num_hidden_layers = len(keep_idx)
-    if hasattr(model, "config"):
-        model.config.num_hidden_layers = len(keep_idx)
-    # 同步截断「长度=层数」的配置字段，避免加载校验失败
+
+    # ============ 同步配置（关键，写错会导致模型结构错乱）============
+    # Qwen3.6/3.5 是「混合线性注意力」模型：
+    #   layer_types = [linear_attention ×3, full_attention ×1] 重复（48 + 16 = 64 层）
+    # 而剪枝保留的是【最重要的层，索引任意】，不是前缀！
+    # 所以 layer_types 必须【按实际保留的索引重排】，绝不能简单截断前缀。
+    new_types = {}
     for field in ("layer_types", "decoder_layer_types", "hidden_layers"):
         val = getattr(cfg, field, None)
         if isinstance(val, (list, tuple)) and len(val) == n:
-            setattr(cfg, field, list(val)[:len(keep_idx)])
+            new_types[field] = [val[i] for i in keep_idx]      # ← 按保留索引重排
+            setattr(cfg, field, new_types[field])
+
+    if new_types:
+        f0 = list(new_types)[0]
+        from collections import Counter
+        print(f"[剪枝] 重排 {f0}: {dict(Counter(new_types[f0]))}")
+
+    cfg.num_hidden_layers = len(keep_idx)
+    if hasattr(model, "config"):
+        model.config.num_hidden_layers = len(keep_idx)
+
+    # full_attention_interval：若存在且新层类型不再是固定周期，必须去掉，
+    # 否则模型会按「每 N 层一个 full attention」重新推导，与实际 layer_types 冲突。
+    fai = getattr(cfg, "full_attention_interval", None)
+    if fai and new_types.get("layer_types"):
+        lt = new_types["layer_types"]
+        periodic = all(lt[i] == ("full_attention" if (i + 1) % fai == 0
+                                 else "linear_attention") for i in range(len(lt)))
+        if not periodic:
+            setattr(cfg, "full_attention_interval", None)
+            print(f"[剪枝] 层类型不再满足每 {fai} 层的周期 → 已清空 full_attention_interval")
+        else:
+            print(f"[剪枝] 层类型仍满足每 {fai} 层周期，保留 full_attention_interval")
+
+    # MTP（多 token 预测）层是独立的 mtp.*，与文本层数无关；
+    # 若保持开启但其权重未随剪枝保存，加载会缺参 → 这里显式关闭并提示。
+    mtp = getattr(cfg, "mtp_num_hidden_layers", None)
+    if mtp:
+        print(f"[剪枝] 检测到 MTP(mtp_num_hidden_layers={mtp})："
+              f"其权重在 mtp.* 命名空间，与文本层剪枝无关。")
+        print("       若后续加载报缺少 mtp.* 权重，可设为 0 关闭 MTP。")
 
     os.makedirs(out_dir, exist_ok=True)
     model.save_pretrained(out_dir, safe_serialization=True)
