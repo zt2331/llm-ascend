@@ -130,13 +130,35 @@ def _prefix_of(sub, root):
     return ""
 
 
-def quant_ignore_patterns(path, extra=("lm_head",)):
-    """构造 llm-compressor 的 ignore 列表。多模态自动追加视觉塔。
+def has_linear_attn_config(path) -> bool:
+    """从 config.json 判断是否为「混合线性注意力」模型（如 Qwen3.5/3.6 的 GatedDeltaNet）。
 
-    注意：昇腾侧只量化标准 Linear；若模型含混合线性注意力（如 linear_attn），
-    建议一并 ignore，避免推理引擎量化加载器命名不匹配。
+    这类模型 layer_types 里会同时出现 linear_attention / full_attention。
     """
-    ignore = list(extra)
+    try:
+        with open(os.path.join(path, "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return False
+    tc = cfg.get("text_config", cfg) or {}
+    lt = tc.get("layer_types") or cfg.get("layer_types") or []
+    return any("linear" in str(t).lower() for t in lt)
+
+
+def quant_ignore_patterns(path, extra=None):
+    """构造 llm-compressor 的 ignore 列表。
+
+    三处默认不量化（保持 bf16）：
+      1. lm_head            —— 直接决定输出 logits 分布
+      2. 视觉塔(visual...)  —— 多模态模型，结构特殊且基准是文本任务
+      3. linear_attn        —— ★ 混合线性注意力(GatedDeltaNet)：
+         vLLM 的量化加载器与 llm-compressor 的模块命名不一致
+         （vLLM 期望 in_proj_baa/in_proj_qkvzz 等融合名），
+         量化后会出现「能加载但输出乱码」。必须跳过。
+    """
+    ignore = list(extra) if extra else ["lm_head"]
     if is_multimodal_config(path):
         ignore += VISION_IGNORE
+    if has_linear_attn_config(path):
+        ignore.append(".*linear_attn.*")
     return ignore
