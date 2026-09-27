@@ -24,6 +24,78 @@ import config
 from utils import device as dev
 
 
+def _pkg_version(dist):
+    """从包元数据读版本（None 表示未安装）。"""
+    try:
+        from importlib.metadata import version, PackageNotFoundError
+        return version(dist)
+    except PackageNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def _scan_msmodelslim():
+    """扫描已安装的 msmodelslim 包，找出定义 Calibrator/QuantConfig 的模块路径。
+
+    昇腾 msModelSlim 各版本模块路径不统一（26.x 与早期差异较大），
+    用它自动定位正确的导入路径，避免"装了却导不进来"。
+    """
+    import importlib.util
+    import re
+
+    try:
+        spec = importlib.util.find_spec("msmodelslim")
+    except Exception:
+        return []
+    if spec is None or not spec.submodule_search_locations:
+        return []
+    root = list(spec.submodule_search_locations)[0]
+    found = []
+    for dirpath, _dirs, files in os.walk(root):
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            p = os.path.join(dirpath, fn)
+            try:
+                src = open(p, encoding="utf-8", errors="ignore").read()
+            except Exception:
+                continue
+            hits = [c for c in ("Calibrator", "QuantConfig")
+                    if re.search(rf"^\s*class\s+{c}\b", src, re.M)]
+            if hits:
+                rel = os.path.relpath(p, root)[:-3].replace(os.sep, ".")
+                if rel.endswith(".__init__"):
+                    rel = rel[: -len(".__init__")]
+                found.append((f"msmodelslim.{rel}", hits))
+    return found
+
+
+def _print_api_help(has_module: bool):
+    """打印 msModelSlim 的 API 定位帮助。"""
+    if not has_module:
+        print("\n  未检测到 msmodelslim 包本身。获取方式：")
+        print("    1) 昇腾镜像是常见的自带来源")
+        print("    2) gitcode.com/Ascend/msmodelslim 或 MindStudio 工具包")
+        print("    3) 回退: python quantize/gen_llmcomp.py --scheme W8A8")
+        return
+    print("\n  已检测到 msmodelslim，但未找到预期的 Calibrator/QuantConfig。")
+    print("  正在扫描包内实际 API ...")
+    found = _scan_msmodelslim()
+    if found:
+        print("  在本机 msmodelslim 里发现以下定义：")
+        for mod, hits in found[:10]:
+            print(f"    {mod}   ->  {', '.join(hits)}")
+        print("\n  按上面的路径调整本脚本顶部的导入，或参考其 docstring 用法。")
+    else:
+        print("  未扫描到 Calibrator/QuantConfig —— 该版本 API 可能已重构。")
+        print('  查看位置: python -c "import msmodelslim,os;print(os.path.dirname(msmodelslim.__file__))"')
+    print("\n  可直接使用的回退方案（无需 msmodelslim）：")
+    print("    python quantize/gen_llmcomp.py --scheme W8A8     # llm-compressor")
+    print("    python quantize/manual_awq.py                    # 手写 AWQ（纯 PyTorch）")
+    print("    python quantize/manual_gptq.py                   # 手写 GPTQ（纯 PyTorch）")
+
+
 def _import_msmodelslim():
     """尝试多种导入路径（不同版本包名有差异）。"""
     tries = [
@@ -31,6 +103,13 @@ def _import_msmodelslim():
         ("msmodelslim.pytorch.llm_ptq", "Calibrator", "QuantConfig"),
         ("msmodelslim", "Calibrator", "QuantConfig"),
     ]
+    # 动态补充：扫描包内真实路径（应对 26.x 等新版本路径变更）
+    for mod, hits in _scan_msmodelslim():
+        if "Calibrator" in hits and "QuantConfig" in hits:
+            entry = (mod, "Calibrator", "QuantConfig")
+            if entry not in tries:
+                tries.insert(0, entry)
+
     for mod, cname, qname in tries:
         try:
             m = __import__(mod, fromlist=[cname, qname])
@@ -75,12 +154,9 @@ def main():
 
     Calibrator, QuantConfig, modname = _import_msmodelslim()
     if Calibrator is None:
-        print("[FAIL] 未找到 msmodelslim。获取方式（任选）：")
-        print("  1) 昇腾镜像/开发环境通常自带：检查 /usr/local/Ascend 下的 MindStudio 工具")
-        print("  2) 从昇腾社区下载 msModelSlim 工具包后：")
-        print("       pip install msmodelslim-*.whl")
-        print("  3) 回退到 llm-compressor 路径：")
-        print("       python quantize/gen_llmcomp.py --scheme W8A8")
+        print("[FAIL] 未能导入 msmodelslim 的 Calibrator/QuantConfig")
+        _has_ms = _pkg_version("msmodelslim") is not None
+        _print_api_help(_has_ms)
         return 3
 
     print(f"[OK] 已导入 msmodelslim 于 {modname}")
@@ -160,9 +236,17 @@ def main():
     print("[FAIL] msModelSlim 调用均失败，尝试记录：")
     for a in attempts:
         print("   -", a)
-    print("\n建议：")
-    print("  1) 核对本机 msModelSlim 版本与官方示例（API 签名常有差异）")
-    print("  2) 回退: python quantize/gen_llmcomp.py --scheme W8A8")
+    print(f"\n  已导入的 API 来自: {modname}")
+    try:
+        import inspect
+        print(f"  QuantConfig 签名: {inspect.signature(QuantConfig)}")
+        print(f"  Calibrator  签名: {inspect.signature(Calibrator.__init__)}")
+    except Exception as e:
+        print(f"  （无法打印签名: {e}）")
+    print("\n  请对照上面的真实签名调整调用参数；或直接用回退方案：")
+    print("    python quantize/gen_llmcomp.py --scheme W8A8     # llm-compressor")
+    print("    python quantize/manual_awq.py                    # 手写 AWQ（纯 PyTorch）")
+    print("    python quantize/manual_gptq.py                   # 手写 GPTQ（纯 PyTorch）")
     return 4
 
 

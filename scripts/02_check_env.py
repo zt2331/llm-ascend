@@ -167,7 +167,19 @@ def main():
     print("    可选:")
     for d in OPTIONAL:
         v = pkg_version(d)
-        print(f"      {d:<16}{v if v else '(未安装, 可选)':>14}")
+        # 已装也打 [OK]，保持与上面两栏一致（之前只打印版本号，容易误以为没装）
+        print(f"      {d:<16}{v if v else '(未安装)':>14}   {OK if v else '[SKIP]'}")
+
+    # ---------- 7. 可用量化路径 ----------
+    print("\n[7] 可用量化路径")
+    has_ms = pkg_version("msmodelslim") is not None
+    has_lc = pkg_version("llmcompressor") is not None
+    print(f"      {'昇腾原生 msModelSlim (W8A8)':<30}"
+          f"{'✅ 可用  -> quantize/ascend_quant.py' if has_ms else '❌ 不可用（缺 msmodelslim）'}")
+    print(f"      {'llm-compressor (调库量化)':<30}"
+          f"{'✅ 可用  -> quantize/gen_llmcomp.py / w8a8_smooth.py' if has_lc else '❌ 不可用（缺 llmcompressor）'}")
+    print(f"      {'手写 AWQ / GPTQ (纯 PyTorch)':<30}"
+          f"✅ 始终可用  -> quantize/manual_awq.py / manual_gptq.py")
 
     # ---------- 汇总 ----------
     print("\n" + "=" * 74)
