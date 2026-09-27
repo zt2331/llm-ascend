@@ -111,17 +111,34 @@ fi
 
 # ---------- 5. 量化 ----------
 if want quantize; then
+  # ★ 量化对象：优先用蒸馏产物，其次剪枝产物，最后才回退 base。
+  #   否则剪枝/蒸馏白做，量化出来的还是原始模型。
+  QTARGET="$MODEL_PATH"
+  _pick() { [ -n "$1" ] && [ -d "$1" ] && QTARGET="$1" || true; }
+  _latest() { ls -dt "$1"/* 2>/dev/null | head -1; }
+  if [ "${SKIP_DISTILL:-0}" != "1" ]; then
+    _pick "$( _latest "$PROJ/output_models/distilled" )"
+  fi
+  if [ "$QTARGET" = "$MODEL_PATH" ]; then
+    _pick "$( _latest "$PROJ/output_models/pruned" )"
+  fi
+  echo ""
+  echo "[量化对象] $QTARGET"
+  if [ "$QTARGET" = "$MODEL_PATH" ]; then
+    echo "          （未找到剪枝/蒸馏产物，回退到原始模型）"
+  fi
+  QARGS=(--model "$QTARGET" --calib "$CALIB" --seq "$SEQ")
+
   # 5.1 昇腾原生 W8A8（★昇腾主力方案，优先）
   run_stage quantize_ascend "$PY" quantize/ascend_quant.py \
-      --scheme "$QUANT_SCHEME" --calib "$CALIB" --seq "$SEQ" || true
+      --scheme "$QUANT_SCHEME" "${QARGS[@]}" || true
 
   # 5.2 SmoothQuant W8A8（激活离群迁移 + INT8）
-  run_stage quantize_smooth "$PY" quantize/w8a8_smooth.py \
-      --calib "$CALIB" --seq "$SEQ" || true
+  run_stage quantize_smooth "$PY" quantize/w8a8_smooth.py "${QARGS[@]}" || true
 
-  # 5.3 llm-compressor 调库路径（compressed-tensors）
+  # 5.3 llm-compressor 调库路径（compressed-tensors / RTN 基线）
   run_stage quantize_llmcomp "$PY" quantize/gen_llmcomp.py \
-      --scheme "$QUANT_SCHEME" --calib "$CALIB" --seq "$SEQ" || true
+      --scheme "$QUANT_SCHEME" "${QARGS[@]}" || true
 
   # 5.4 从零手写 AWQ / GPTQ（展示算法实现；逐列循环较慢）
   if [ "${SKIP_MANUAL:-0}" != "1" ]; then
@@ -130,9 +147,9 @@ if want quantize; then
     echo "[说明] 手写 AWQ/GPTQ 逐列循环较慢，默认只量化前 $ML 层做演示。"
     echo "       全模型量化: MANUAL_MAX_LAYERS=0 bash scripts/run_all.sh"
     run_stage quantize_manual_awq "$PY" quantize/manual_awq.py \
-        --bits 4 --calib "$CALIB" --seq "$SEQ" --max-layers "$ML" || true
+        --bits 4 "${QARGS[@]}" --max-layers "$ML" || true
     run_stage quantize_manual_gptq "$PY" quantize/manual_gptq.py \
-        --bits 4 --calib "$CALIB" --seq "$SEQ" --max-layers "$ML" || true
+        --bits 4 "${QARGS[@]}" --max-layers "$ML" || true
   fi
 fi
 
