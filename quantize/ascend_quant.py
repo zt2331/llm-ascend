@@ -170,14 +170,35 @@ def main():
     print(f"[INFO] 校准样本 {len(calib)} 条，最大长度 {args.seq}")
 
     # 不量化的层（lm_head / 视觉塔 / 混合线性注意力）
-    disable_names = []
-    try:
-        for n, _m in model.named_modules():
-            if n.endswith("lm_head") or "visual" in n or "linear_attn" in n:
-                disable_names.append(n)
-    except Exception:
-        pass
-    print(f"[INFO] disable_names 数量 = {len(disable_names)}")
+    # ★ msModelSlim 的 disable_names 只接受【具体 Linear 层】的名字，
+    #   传入容器模块名（如 visual、visual.blocks）会报
+    #   "invalid key `visual`"。所以这里只收集 nn.Linear 的叶子名字。
+    import torch.nn as nn
+
+    skip_linear_names = []
+    for n, m in model.named_modules():
+        if not isinstance(m, nn.Linear):
+            continue
+        if n.endswith("lm_head") or "visual" in n or "linear_attn" in n:
+            skip_linear_names.append(n)
+    print(f"[INFO] 需跳过的 Linear 层: {len(skip_linear_names)} 个"
+          f"（lm_head / visual / linear_attn）")
+    if skip_linear_names:
+        print(f"       示例: {skip_linear_names[:3]}")
+
+    # msModelSlim 各版本对名字前缀要求不同，准备多种格式依次尝试
+    def _strip_prefix(names, prefix):
+        out = []
+        for n in names:
+            out.append(n[len(prefix):] if prefix and n.startswith(prefix) else n)
+        return out
+
+    disable_variants = [
+        ("完整 Linear 名", skip_linear_names),
+        ("去掉 model. 前缀", _strip_prefix(skip_linear_names, "model.")),
+        ("仅 lm_head", [n for n in skip_linear_names if n.endswith("lm_head")]),
+        ("不跳过（仅调试）", []),
+    ]
 
     w_bit, a_bit = (8, 8) if args.scheme == "W8A8" else (8, 16)
     if args.scheme == "W4A16":
@@ -187,39 +208,43 @@ def main():
 
     # ---- 多版本 API 兼容尝试 ----
     attempts = []
+
     def _try(fn, tag):
         try:
             fn()
             print(f"[OK] 量化成功（{tag}）")
             return True
         except TypeError as e:
-            attempts.append(f"{tag}: TypeError {str(e)[:160]}")
+            attempts.append(f"{tag}: TypeError {str(e)[:180]}")
         except Exception as e:
-            attempts.append(f"{tag}: {type(e).__name__} {str(e)[:160]}")
+            attempts.append(f"{tag}: {type(e).__name__} {str(e)[:180]}")
         return False
 
-    def api_v1():
-        qc = QuantConfig(w_bit=w_bit, a_bit=a_bit, disable_names=disable_names,
-                         dev_type="npu" if dev.has_npu() else "cpu", dev_id=0)
-        cal = Calibrator(model, qc, calib_data=calib)
-        cal.run()
-        cal.save(out_dir, save_type=["safe_tensor"])
+    def make_api(disable, dev_type, use_calib):
+        def api():
+            kwargs = dict(w_bit=w_bit, a_bit=a_bit)
+            if disable:
+                kwargs["disable_names"] = disable
+            if dev_type:
+                kwargs["dev_type"] = dev_type
+            qc = QuantConfig(**kwargs)
+            if use_calib:
+                cal = Calibrator(model, qc, calib_data=calib)
+            else:
+                cal = Calibrator(model, qc, calib_data=calib, disable_level="L0")
+            cal.run()
+            cal.save(out_dir, save_type=["safe_tensor"])
+        return api
 
-    def api_v2():
-        qc = QuantConfig(w_bit=w_bit, a_bit=a_bit)
-        cal = Calibrator(model, qc, calib_data=calib, disable_names=disable_names)
-        cal.run()
-        cal.save(out_dir, save_type=["safe_tensor"])
+    dev_type = "npu" if dev.has_npu() else "cpu"
+    plan = []
+    for label, names in disable_variants:
+        plan.append((make_api(names, dev_type, True), f"Calibrator(calib_data) + {label}"))
+    # 再来一轮：不带 dev_type（用默认），兼容老版本
+    for label, names in disable_variants[:2]:
+        plan.append((make_api(names, None, False), f"Calibrator(disable_level) + {label}"))
 
-    def api_v3():
-        qc = QuantConfig(w_bit=w_bit, a_bit=a_bit, disable_names=disable_names)
-        cal = Calibrator(model, qc, calib_data=calib, disable_level="L0")
-        cal.run()
-        cal.save(out_dir, save_type=["safe_tensor"], part_file_size=None)
-
-    for fn, tag in ((api_v1, "QuantConfig(dev_type)+Calibrator(calib_data)"),
-                    (api_v2, "Calibrator(disable_names)"),
-                    (api_v3, "Calibrator(disable_level)")):
+    for fn, tag in plan:
         if _try(fn, tag):
             # 复制配套文件
             import shutil

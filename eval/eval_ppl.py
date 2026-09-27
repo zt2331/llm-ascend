@@ -93,7 +93,7 @@ def main():
     for label, path in list_targets(args.model):
         print(f"\n>>> {label}\n    {path}")
         try:
-            model = load_model(path, prefer_device=args.device)
+            model = load_model(path, prefer_device=args.device, need_logits=True)
             ppl, ntok = compute_ppl(model, tok, texts, args.seq, args.stride, args.device)
             del model
             dev.empty_cache(args.device)

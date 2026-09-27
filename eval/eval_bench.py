@@ -185,7 +185,7 @@ def main():
         print(f"\n>>> {label}\n    {path}")
         entry = {}
         try:
-            model = load_model(path, prefer_device=args.device)
+            model = load_model(path, prefer_device=args.device, need_logits=True)
             acc, tot = next_token_accuracy(model, tok, texts, args.seq, args.device)
             entry["next_token_acc"] = round(acc, 4) if acc is not None else None
             entry["next_token_tokens"] = tot

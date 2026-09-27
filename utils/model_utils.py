@@ -18,10 +18,81 @@ VISION_ATTRS = ("visual", "vision_model", "vision_tower", "image_encoder", "visi
 VISION_IGNORE = [re.escape(a) + r"($|\.)" for a in VISION_ATTRS]
 
 
+def _find_lm_head_owner(model):
+    """返回 (owner_module, attr_name)，或用 None 表示模型没有 lm_head。"""
+    for owner, attr in ((model, "lm_head"),):
+        if hasattr(owner, attr):
+            return owner, attr
+    lm = getattr(model, "language_model", None)
+    if lm is not None and hasattr(lm, "lm_head"):
+        return lm, "lm_head"
+    inner = getattr(model, "model", None)
+    if inner is not None:
+        if hasattr(inner, "lm_head"):
+            return inner, "lm_head"
+        lm2 = getattr(inner, "language_model", None)
+        if lm2 is not None and hasattr(lm2, "lm_head"):
+            return lm2, "lm_head"
+    return None
+
+
+def ensure_lm_head(model, path):
+    """确保模型带 lm_head，否则 AutoModel 返回的基座模型取不到 logits。
+
+    多模态模型（如 Qwen3_5ForConditionalGeneration）用 AutoModel 加载后是
+    `Qwen3_5Model`，**不含 lm_head**；此时 eval 阶段 `model(x).logits` 会失败。
+    这里从 checkpoint 里把 lm_head 权重找出来补上（或与 embed_tokens 共享）。
+    """
+    if _find_lm_head_owner(model) is not None:
+        return model
+
+    # 找 hidden_size / vocab_size
+    cfg = getattr(model, "config", None)
+    tc = getattr(cfg, "text_config", None) or cfg
+    hidden = getattr(tc, "hidden_size", None)
+    vocab = getattr(tc, "vocab_size", None)
+    if not hidden or not vocab:
+        return model
+
+    weight = None
+    try:
+        import glob
+        from safetensors import safe_open
+        for shard in sorted(glob.glob(os.path.join(path, "*.safetensors"))):
+            with safe_open(shard, framework="pt", device="cpu") as f:
+                if "lm_head.weight" in f.keys():
+                    weight = f.get_tensor("lm_head.weight")
+                    break
+    except Exception:
+        weight = None
+
+    head = nn.Linear(hidden, vocab, bias=False)
+    if weight is not None and tuple(weight.shape) == (vocab, hidden):
+        with torch.no_grad():
+            head.weight.copy_(weight)
+        print(f"[INFO] 已从 checkpoint 补上 lm_head: {tuple(weight.shape)}")
+    else:
+        # 没有独立 lm_head 权重 → 与词嵌入共享（tie_word_embeddings）
+        dec = _find_transformer_decoder(model)
+        emb = getattr(dec, "embed_tokens", None)
+        if emb is not None and tuple(emb.weight.shape) == (vocab, hidden):
+            head.weight = emb.weight
+            print("[INFO] lm_head 未找到，已与 embed_tokens 共享权重")
+        else:
+            print("[WARN] 无法补上 lm_head，eval 取 logits 可能失败")
+            return model
+    model.lm_head = head
+    return model
+
+
 # ----------------------------- 加载 -----------------------------
 def load_model(path, prefer_device="auto", dtype="float16", device_map=None,
-               eval_mode=True):
-    """设备感知加载：优先 AutoModel（多模态/文本都能出），失败退 AutoModelForCausalLM。"""
+               eval_mode=True, need_logits=False):
+    """设备感知加载。
+
+    need_logits=True 时（评测用），会确保模型带 lm_head；
+    多模态模型用 AutoModel 加载后基座不含 lm_head，会自动从 checkpoint 补上。
+    """
     from transformers import AutoModel, AutoModelForCausalLM
 
     tdtype = getattr(torch, dtype, torch.float16)
@@ -30,10 +101,21 @@ def load_model(path, prefer_device="auto", dtype="float16", device_map=None,
     if device_map is not None:
         kwargs["device_map"] = device_map
 
-    try:
-        model = AutoModel.from_pretrained(path, **kwargs)
-    except Exception:
-        model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+    model = None
+    if need_logits:
+        # 纯文本模型优先 ForCausalLM（自带 lm_head）
+        try:
+            model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+        except Exception:
+            model = None
+    if model is None:
+        try:
+            model = AutoModel.from_pretrained(path, **kwargs)
+        except Exception:
+            model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+
+    if need_logits:
+        ensure_lm_head(model, path)
 
     if device_map is None and d != "cpu":
         try:
