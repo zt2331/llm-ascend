@@ -129,7 +129,7 @@ def try_lm_eval(model_path, tasks, limit, prefer_device):
     try:
         from lm_eval import simple_evaluate
         device = "npu" if dev.has_npu() else ("cuda" if dev.has_cuda() else "cpu")
-        r = simple_evaluate(model="hf", model_args=f"pretrained={model_path},dtype=float16,trust_remote_code=True",
+        r = simple_evaluate(model="hf", model_args=f"pretrained={model_path},dtype=bfloat16,trust_remote_code=True",
                             tasks=tasks, num_fewshot=0, batch_size=1, limit=limit, device=device)
         out = {}
         for t in tasks:

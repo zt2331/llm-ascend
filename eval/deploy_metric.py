@@ -41,7 +41,7 @@ def run_one(path, quant, prefer_device="auto"):
     kw = {}
     if quant:
         kw["quantization"] = quant
-    common = dict(model=path, trust_remote_code=True, dtype="float16",
+    common = dict(model=path, trust_remote_code=True, dtype="bfloat16",
                   gpu_memory_utilization=0.90, max_model_len=2048,
                   enforce_eager=False)
     common.update(kw)

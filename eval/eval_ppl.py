@@ -61,6 +61,37 @@ def list_targets(explicit=None):
     return items
 
 
+def _get_logits(model, input_ids):
+    """取 logits；多模态基座模型（AutoModel 返回的 Qwen3_5Model）没有 .logits，
+    需要把 last_hidden_state 过一遍 lm_head。"""
+    out = model(input_ids)
+    lg = getattr(out, "logits", None)
+    if lg is not None:
+        return lg
+    hs = getattr(out, "last_hidden_state", None)
+    if hs is None:
+        if isinstance(out, (tuple, list)) and out:
+            hs = out[0]
+        else:
+            hs = getattr(out, "hidden_states", None)
+            if isinstance(hs, (tuple, list)) and hs:
+                hs = hs[-1]
+    if hs is None:
+        raise RuntimeError(
+            "无法从模型输出取 hidden_states/logits。"
+            f"输出类型={type(out).__name__}, 属性={list(getattr(out, 'keys', lambda: [])())}")
+
+    head = None
+    for holder in (model, getattr(model, "language_model", None),
+                   getattr(model, "model", None)):
+        if holder is not None and hasattr(holder, "lm_head"):
+            head = holder.lm_head
+            break
+    if head is None:
+        raise RuntimeError("模型既无 logits 也无 lm_head，无法计算 PPL")
+    return head(hs)
+
+
 # ----------------------------------------------------------------------
 # 后端 A：transformers（fp16 模型可用；量化模型可能 OOM）
 # ----------------------------------------------------------------------
@@ -77,7 +108,7 @@ def ppl_hf(model_path, tok, texts, seq, stride, prefer_device):
     total_nll, total_tok = 0.0, 0
     for c in chunks:
         b = torch.tensor([c], dtype=torch.long, device=target)
-        logits = model(b).logits[:, :-1].contiguous()
+        logits = _get_logits(model, b)[:, :-1].contiguous()
         lab = b[:, 1:].contiguous()
         nll = F.cross_entropy(logits.view(-1, logits.shape[-1]).float(),
                               lab.view(-1), reduction="sum")
@@ -91,11 +122,16 @@ def ppl_hf(model_path, tok, texts, seq, stride, prefer_device):
 # ----------------------------------------------------------------------
 # 后端 B：vLLM（量化模型推荐；保持量化精度，显存占用低）
 # ----------------------------------------------------------------------
-def ppl_vllm(model_path, tok, texts, seq, quant, gpu_util, prefer_device):
+def ppl_vllm(model_path, tok, texts, seq, quant, gpu_util, prefer_device, dtype="bfloat16"):
+    """★ dtype 必须用 bfloat16：
+    Qwen3.6 原生 dtype 就是 bfloat16；若强制 float16，量化产物的 weight_scale
+    会变成 fp16，而昇腾 aclnnQuantMatmulWeightNz 只接受
+    [DT_UINT64, DT_BFLOAT16, DT_INT64, DT_FLOAT] → 报 161002 / EZ1001。
+    """
     from vllm import LLM, SamplingParams
 
     kw = {"quantization": quant} if quant else {}
-    llm = LLM(model=model_path, dtype="float16", trust_remote_code=True,
+    llm = LLM(model=model_path, dtype=dtype, trust_remote_code=True,
               max_model_len=max(seq, 512), gpu_memory_utilization=gpu_util,
               disable_log_stats=True, **kw)
     # prompt_logprobs=0 → 返回每个 prompt 位置真实 token 的对数概率
@@ -149,7 +185,8 @@ def run_one(path, tok, texts, args, prefer_device):
 
     if backend == "vllm":
         try:
-            return ppl_vllm(path, tok, texts, args.seq, quant, args.gpu_util, prefer_device)
+            return ppl_vllm(path, tok, texts, args.seq, quant, args.gpu_util,
+                            prefer_device, args.vllm_dtype)
         except Exception as e:
             print(f"    [WARN] vLLM 失败({type(e).__name__}: {str(e)[:120]})，回退 transformers")
     return ppl_hf(path, tok, texts, args.seq, args.stride, prefer_device)
@@ -163,6 +200,8 @@ def main():
     ap.add_argument("--stride", type=int, default=512)
     ap.add_argument("--max-texts", type=int, default=64)
     ap.add_argument("--gpu-util", type=float, default=0.90)
+    ap.add_argument("--vllm-dtype", default="bfloat16",
+                    help="vLLM 加载精度；昇腾量化算子要求 bf16/fp32，默认 bfloat16")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 

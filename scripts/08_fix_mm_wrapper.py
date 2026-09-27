@@ -102,6 +102,12 @@ def main():
     ap.add_argument("quant_dir")
     ap.add_argument("--orig", default=None, help="原始多模态模型目录（默认 config.MODEL_PATH）")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--scale-dtype", default="float32",
+                    choices=["keep", "float32", "bfloat16"],
+                    help="把 weight_scale / input_scale 转成该 dtype。"
+                         "昇腾 aclnnQuantMatmulWeightNz 只接受 "
+                         "[UINT64, BF16, INT64, FLOAT]，fp16 的 scale 会报 161002，"
+                         "因此默认转 float32（精度最高且被接受）")
     args = ap.parse_args()
 
     qd = os.path.abspath(args.quant_dir.rstrip("/"))
@@ -134,8 +140,12 @@ def main():
     final_cfg = copy.deepcopy(ocfg)
     final_cfg["quantization_config"] = qq
     # 视觉塔是未量化的 fp16 张量，必须让 vLLM 跳过它，否则会按量化建 weight_scale
+    # 未量化的部分必须在 ignore 里声明，否则加载/推理时会尝试量化它们：
+    #   lm_head      → 输出分布敏感
+    #   visual       → 视觉塔保持 fp16
+    #   linear_attn  → 混合线性注意力，量化后 vLLM 输出异常
     ign = qq.setdefault("ignore", [])
-    for pat in ("re:.*visual.*", "re:.*linear_attn.*"):
+    for pat in ("lm_head", "re:.*visual.*", "re:.*linear_attn.*"):
         if pat not in ign:
             ign.append(pat)
 
@@ -169,6 +179,19 @@ def main():
         print(f"      合并完成: 原始非LM {len(ow)} 个 + 量化 language_model {n_lm} 个")
     else:
         merged = qw
+
+    # ---- 量化 scale 的 dtype 转换（昇腾 kernel 要求 bf16/fp32/int64/uint64）----
+    if args.scale_dtype != "keep":
+        import torch as _t
+        tgt = {"float32": _t.float32, "bfloat16": _t.bfloat16}[args.scale_dtype]
+        n_conv = 0
+        for k in list(merged):
+            if k.endswith("weight_scale") or k.endswith("input_scale"):
+                v = merged[k]
+                if v.dtype != tgt:
+                    merged[k] = v.to(tgt)
+                    n_conv += 1
+        print(f"      scale dtype 转换: {n_conv} 个 -> {args.scale_dtype}")
 
     # 校验：量化张量是否都在
     n_scale = sum(1 for k in merged if k.endswith("weight_scale"))
@@ -226,6 +249,11 @@ def main():
     print(f"    有 vision_config = {bool(oc.get('vision_config'))}")
     print(f"    quantization_config.quant_method = "
           f"{(oc.get('quantization_config') or {}).get('quant_method')}")
+    print(f"    quantization_config.ignore       = "
+          f"{(oc.get('quantization_config') or {}).get('ignore')}")
+    sample = [k for k in merged if k.endswith("weight_scale")]
+    if sample:
+        print(f"    weight_scale 示例 dtype = {merged[sample[0]].dtype}")
     assert oc.get("vision_config"), "vision_config 丢失"
     print("\n使用方式:")
     print(f"    export MODEL_PATH={out}")
