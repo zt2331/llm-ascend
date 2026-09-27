@@ -86,7 +86,8 @@ def _flatten(x):
     return out
 
 
-def build_recipe(method, scheme, group_size, ignore, alpha=0.75):
+def build_recipe(method, scheme, group_size, ignore, alpha=0.75,
+                 awq_duo_scaling="both", awq_n_grid=20):
     """构造 recipe（modifier 对象列表）。
 
     注意各版本 API 差异：
@@ -126,9 +127,18 @@ def build_recipe(method, scheme, group_size, ignore, alpha=0.75):
                 "  find <该目录> -name '*awq*'\n"
                 "替代: --method gptq 或 --method rtn")
         awq_scheme = scheme if ("ASYM" in scheme or "SYM" in scheme) else "W4A16_ASYM"
+        # 速度/质量权衡：
+        #   n_grid   —— 网格搜索的候选数（默认 20）。越小越快、精度略降
+        #   duo_scaling —— 'both' 搜两个方向（最慢最准）；True 只搜输入；False 不额外搜
+        ds_kw = {"both": "both", "true": True, "false": False}[str(awq_duo_scaling).lower()]
         last = None
         plans = [
             # 新 API：AWQModifier 只负责算缩放
+            (dict(duo_scaling=ds_kw, n_grid=awq_n_grid), True,
+             f"AWQModifier(duo_scaling={ds_kw!r}, n_grid={awq_n_grid}) + "
+             f"QuantizationModifier({awq_scheme})"),
+            (dict(duo_scaling=ds_kw), True,
+             f"AWQModifier(duo_scaling={ds_kw!r}) + QuantizationModifier({awq_scheme})"),
             (dict(duo_scaling="both"), True, f"AWQModifier(duo_scaling='both') + QuantizationModifier({awq_scheme})"),
             (dict(duo_scaling=True), True, f"AWQModifier(duo_scaling=True) + QuantizationModifier({awq_scheme})"),
             (dict(), True, f"AWQModifier() + QuantizationModifier({awq_scheme})"),
@@ -179,6 +189,13 @@ def main():
                          "gptq(二阶误差补偿) / rtn(朴素基线)")
     ap.add_argument("--alpha", type=float, default=0.75,
                     help="SmoothQuant 迁移强度 0~1（越大越把量化难度给权重）")
+    ap.add_argument("--awq-n-grid", type=int, default=20,
+                    help="AWQ 网格搜索候选数（默认 20）。这是 AWQ 慢的主因："
+                         "把它降到 5~10 可显著提速，精度略降")
+    ap.add_argument("--awq-duo-scaling", default="both",
+                    choices=["both", "true", "false"],
+                    help="AWQ 缩放搜索方向：both 搜两个方向（最慢最准，默认）；"
+                         "true 只搜输入方向；false 不额外搜索（最快）")
     ap.add_argument("--scheme", default=None, help="显式指定 scheme；不填按 method+bits 推断")
     ap.add_argument("--bits", type=int, default=4, help="位宽（awq/gptq 默认 4）")
     ap.add_argument("--group-size", type=int, default=128)
@@ -220,7 +237,9 @@ def main():
 
     try:
         recipe = build_recipe(args.method, scheme, args.group_size, ignore,
-                          alpha=args.alpha)
+                              alpha=args.alpha,
+                              awq_duo_scaling=args.awq_duo_scaling,
+                              awq_n_grid=args.awq_n_grid)
     except Exception as e:
         print(f"[FAIL] 构造 recipe 失败: {e}")
         return 3

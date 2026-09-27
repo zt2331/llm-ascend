@@ -132,6 +132,7 @@ if want quantize; then
   # 要跑哪些 llm-compressor 量化：ascend,smooth,awq,gptq,gptq8,rtn
   QMETHODS="${QMETHODS:-smooth,awq,gptq}"
   echo "[llm-compressor 量化方法] $QMETHODS"
+  echo "[AWQ 速度参数] n_grid=${AWQ_N_GRID:-20}  duo_scaling=${AWQ_DUO_SCALING:-both}"
 
   has_m() { case ",$QMETHODS," in *",$1,"*) return 0;; *) return 1;; esac; }
 
@@ -149,7 +150,9 @@ if want quantize; then
   # 5.3 llm-compressor 调库路径：AWQ（激活感知）
   if has_m awq; then
     run_stage quantize_awq "$PY" quantize/gen_llmcomp.py \
-        --method awq --bits 4 --group-size 128 "${QARGS[@]}" || true
+        --method awq --bits 4 --group-size 128 \
+        --awq-n-grid "${AWQ_N_GRID:-20}" \
+        --awq-duo-scaling "${AWQ_DUO_SCALING:-both}" "${QARGS[@]}" || true
   fi
 
   # 5.4 llm-compressor 调库路径：GPTQ（Hessian 二阶 + 逐列误差补偿）
