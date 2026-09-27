@@ -124,6 +124,27 @@ def main():
     for c, n in cats.most_common():
         print(f"    {c:<20}{n}")
 
+    # ---------- 2.5 键名前缀（判断是否与 config 结构匹配）----------
+    pref = Counter(".".join(k.split(".")[:2]) for k in keys)
+    print("\n[2.5] 键名前缀分布（Top 8）")
+    for p_, n in pref.most_common(8):
+        print(f"    {p_:<40}{n}")
+    info_prefixes = set(pref)
+    has_lm_ns = any("language_model" in p_ for p_ in info_prefixes)
+    has_plain_ns = any(p_ == "model.layers" for p_ in info_prefixes)
+    print(f"\n    含 'language_model' 命名空间: {has_lm_ns}")
+    print(f"    含 'model.layers'（纯文本命名空间）: {has_plain_ns}")
+    if cfg.get("architectures") and "CausalLM" in " ".join(cfg.get("architectures") or []):
+        if has_lm_ns:
+            print(f"    {BAD} config 是纯文本({cfg.get('architectures')})，"
+                  f"但权重键带 language_model 前缀")
+            print("         → transformers 按文本结构建模型，找不到这些键，")
+            print("           量化张量(weight_scale)加载不上 → 随机初始化 → PPL=nan")
+            print("         → 修复: python scripts/08_fix_mm_wrapper.py <目录> --orig <base>")
+    print("\n    量化张量键示例:")
+    for k in [x for x in sorted(keys) if x.endswith("weight_scale")][:3]:
+        print(f"      {k}")
+
     quant_markers = cats["weight_scale"] + cats["weight_packed"] + cats["qweight"]
     print()
     if quant_markers == 0:
