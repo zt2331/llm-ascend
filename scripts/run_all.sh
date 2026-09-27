@@ -129,18 +129,46 @@ if want quantize; then
   fi
   QARGS=(--model "$QTARGET" --calib "$CALIB" --seq "$SEQ")
 
-  # 5.1 昇腾原生 W8A8（★昇腾主力方案，优先）
-  run_stage quantize_ascend "$PY" quantize/ascend_quant.py \
-      --scheme "$QUANT_SCHEME" "${QARGS[@]}" || true
+  # 要跑哪些 llm-compressor 量化：ascend,smooth,awq,gptq,gptq8,rtn
+  QMETHODS="${QMETHODS:-smooth,awq,gptq}"
+  echo "[llm-compressor 量化方法] $QMETHODS"
 
-  # 5.2 SmoothQuant W8A8（激活离群迁移 + INT8）
-  run_stage quantize_smooth "$PY" quantize/w8a8_smooth.py "${QARGS[@]}" || true
+  has_m() { case ",$QMETHODS," in *",$1,"*) return 0;; *) return 1;; esac; }
 
-  # 5.3 llm-compressor 调库路径（compressed-tensors / RTN 基线）
-  run_stage quantize_llmcomp "$PY" quantize/gen_llmcomp.py \
-      --scheme "$QUANT_SCHEME" "${QARGS[@]}" || true
+  # 5.1 昇腾原生 W8A8（msModelSlim，需要 msmodelslim）
+  if has_m ascend; then
+    run_stage quantize_ascend "$PY" quantize/ascend_quant.py \
+        --scheme "$QUANT_SCHEME" "${QARGS[@]}" || true
+  fi
 
-  # 5.4 从零手写 AWQ / GPTQ（展示算法实现；逐列循环较慢）
+  # 5.2 SmoothQuant W8A8（激活离群迁移 + INT8，昇腾主力推荐）
+  if has_m smooth; then
+    run_stage quantize_smooth "$PY" quantize/w8a8_smooth.py "${QARGS[@]}" || true
+  fi
+
+  # 5.3 llm-compressor 调库路径：AWQ（激活感知）
+  if has_m awq; then
+    run_stage quantize_awq "$PY" quantize/gen_llmcomp.py \
+        --method awq --bits 4 --group-size 128 "${QARGS[@]}" || true
+  fi
+
+  # 5.4 llm-compressor 调库路径：GPTQ（Hessian 二阶 + 逐列误差补偿）
+  if has_m gptq; then
+    run_stage quantize_gptq "$PY" quantize/gen_llmcomp.py \
+        --method gptq --bits 4 --group-size 128 "${QARGS[@]}" || true
+  fi
+  if has_m gptq8; then
+    run_stage quantize_gptq8 "$PY" quantize/gen_llmcomp.py \
+        --method gptq --bits 8 --group-size 128 "${QARGS[@]}" || true
+  fi
+
+  # 5.5 RTN 基线（最朴素量化，只作对照）
+  if has_m rtn; then
+    run_stage quantize_rtn "$PY" quantize/gen_llmcomp.py \
+        --method rtn --scheme "$QUANT_SCHEME" "${QARGS[@]}" || true
+  fi
+
+  # 5.6 从零手写 AWQ / GPTQ（纯 PyTorch 实现，展示算法细节）
   if [ "${SKIP_MANUAL:-0}" != "1" ]; then
     ML="${MANUAL_MAX_LAYERS:-4}"
     echo ""
