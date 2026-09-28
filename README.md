@@ -53,6 +53,41 @@ output_models/results/
 
 ---
 
+## 一·五、部署 + 可视化对话台
+
+量化完想知道**到底快了多少**，两个终端起服务：
+
+```bash
+# 终端 1：vLLM 推理服务（昇腾 NPU）
+MAX_NUM_SEQS=8 LANGUAGE_MODEL_ONLY=1 bash scripts/serve_ascend.sh \
+    output_models/quantized/Qwen3.6-27B-llmcomp-smooth-W8A8-mm \
+    compressed-tensors 8000
+
+# 终端 2：聊天网页（单文件、零依赖、无需构建）
+bash scripts/serve_chat.sh 8080
+```
+
+浏览器打开 `http://<服务器IP>:8080/` → 填 vLLM 地址 → 点「连接」→ 直接对话。
+
+**每轮回答下方实时显示**：
+
+| 指标 | 含义 |
+|---|---|
+| **TTFT** | 请求发出 → 首个 token 到达，反映 **prefill** 阶段 |
+| **Prefill 速度** | `prompt_tokens ÷ TTFT` |
+| **Decode 速度** | `(输出tokens − 1) ÷ (末token − 首token)` |
+| 输入/输出 tokens | 取自服务端 `usage`（精确，非估算） |
+
+还有「压测 ×5」按钮输出 avg / p50 / p95，以及 decode 速度趋势图。
+
+> 完整部署清单（哪些模型能部署、哪些不能、每个的启动命令）见
+> **[`docs/DEPLOY.md`](docs/DEPLOY.md)**。
+>
+> 度量口径有测试保障：`node tests/test_chat_metrics.js`（用虚拟时钟 + 合成
+> SSE 流验证 TTFT / prefill / decode 的数学）。
+
+---
+
 ## 二、环境准备
 
 ### 2.0 最快路径：不用 conda（⭐ 推荐先这样跑通）
@@ -186,13 +221,19 @@ llm_ascend/
 ├── utils/
 │   ├── device.py              # ★ 设备抽象层：NPU/CUDA/CPU 自动切换
 │   ├── model_utils.py         # 文本 decoder 定位、量化 ignore 构造
-│   └── dataio.py              # 轻量 parquet 读写（不依赖 datasets 库）
+│   ├── dataio.py              # 轻量 parquet 读写（不依赖 datasets 库）
+│   ├── quant_check.py         # 量化产物自检（权重 dtype 是否真的是整型）
+│   ├── mm_wrapper.py          # 多模态 wrapper 恢复（避免评测 nan）
+│   └── npu_compat.py          # ★ 绕开 NPU 缺失算子（cholesky_inverse 等）
+├── web/chat.html              # ★ 聊天网页（单文件零依赖，显示 prefill/decode 速度）
+├── tests/
+│   └── test_chat_metrics.js   # 网页度量口径测试（虚拟时钟 + 合成 SSE）
 ├── prune/prune.py             # 结构化剪枝（ShortGPT 块重要度）
 ├── distill/distill.py         # 知识蒸馏（KL，base 当 teacher）
 ├── quantize/
 │   ├── ascend_quant.py        # ★ 昇腾原生量化（msModelSlim，W8A8）——昇腾主力
-│   ├── w8a8_smooth.py         # SmoothQuant W8A8（激活离群迁移）
-│   ├── gen_llmcomp.py         # llm-compressor 量化（compressed-tensors）
+│   ├── w8a8_smooth.py         # SmoothQuant W8A8（激活离群迁移）——平滑的唯一实现
+│   ├── gen_llmcomp.py         # llm-compressor 量化（AWQ/GPTQ/RTN）
 │   ├── manual_awq.py          # ★ 从零手写 AWQ（激活感知+缩放折叠+AWQ_ORDER 打包）
 │   └── manual_gptq.py         # ★ 从零手写 GPTQ（Hessian 二阶+逐列误差补偿）
 ├── eval/
@@ -210,12 +251,15 @@ llm_ascend/
 │   ├── 04_check_data.py       # 数据校验（数据固定，只检查不生成）
 │   ├── run_all.sh             # ★ 一键全流程
 │   ├── serve_ascend.sh        # vLLM(Ascend) 启动
+│   ├── serve_chat.sh          # ★ 聊天网页静态托管
 │   └── loadtest.py            # 并发压测
 ├── deploy/
 │   ├── k8s.yaml               # 昇腾 NPU 的 Deployment/Service/HPA
 │   └── prometheus.yaml        # vLLM 指标 + NPU 硬件指标采集
 └── docs/
     ├── ARCHITECTURE.md        # ★ 架构与算法细节（含手写 AWQ/GPTQ 推导）
+    ├── DEPLOY.md              # ★ 可部署清单 + 每个模型的 vLLM 启动命令
+    ├── RESULTS.md             # ★ 实测数据 + 国产卡适配踩坑记录
     ├── ASCEND_MIGRATION.md    # ★ CUDA→CANN 迁移差异（面试弹药）
     └── CONDA_SETUP.md         # ★ Miniconda + 手动建环境详细步骤
 ```

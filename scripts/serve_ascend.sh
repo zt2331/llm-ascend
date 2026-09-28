@@ -13,9 +13,12 @@
 #   MAX_MODEL_LEN / GMU     覆盖默认长度与显存利用率
 #   DTYPE                   加载精度，默认 bfloat16（★昇腾量化算子要求 bf16/fp32，
 #                           用 float16 会报 aclnnQuantMatmulWeightNz 161002）
-#   MAX_NUM_SEQS            最大并发序列，默认 64（★Qwen3.6 是 Mamba 混合架构，
-#                           每序列占一个 Mamba cache block，设太大报
-#                           "max_num_seqs exceeds available Mamba cache blocks"）
+#   MAX_NUM_SEQS            最大并发序列，默认 8（★Qwen3.6 是 Mamba 混合架构，
+#                           每序列占一个 Mamba cache block。设太大报
+#                           "max_num_seqs exceeds available Mamba cache blocks (N)"，
+#                           按报错里的 N 调小即可）
+#   ALLOWED_ORIGINS         允许的跨域来源，默认 "*"（聊天网页需要）
+#   ENABLE_PREFIX_CACHING   默认 1，多轮对话复用 prefix 可显著降 TTFT
 #
 # 说明:
 #   vllm-ascend 以插件形式注册 NPU 平台，安装后 `vllm serve` 默认走 NPU。
@@ -39,9 +42,14 @@ ARGS=(serve "$MODEL" --host 0.0.0.0 --port "$PORT"
       --trust-remote-code --dtype "${DTYPE:-bfloat16}"
       --max-model-len "${MAX_MODEL_LEN:-4096}"
       --gpu-memory-utilization "${GMU:-0.90}"
-      --max-num-seqs "${MAX_NUM_SEQS:-64}")
+      --max-num-seqs "${MAX_NUM_SEQS:-8}"
+      --allowed-origins "${ALLOWED_ORIGINS:-*}")
 if [ -n "$QUANT" ]; then
   ARGS+=(--quantization "$QUANT")
+fi
+# prefix caching：多轮聊天复用历史 KV，TTFT 明显下降
+if [ "${ENABLE_PREFIX_CACHING:-1}" = "1" ]; then
+  ARGS+=(--enable-prefix-caching)
 fi
 
 # 官方纯文本模式：跳过视觉编码器与多模态 profiling，省显存给 KV cache
@@ -75,6 +83,11 @@ echo "=============================================================="
 echo "启动后可用以下命令验证:"
 echo "  curl -s http://127.0.0.1:$PORT/v1/models | head"
 echo "  python scripts/loadtest.py --port $PORT"
+echo ""
+echo "★ 聊天网页（显示 prefill / decode 速度）:"
+echo "  bash scripts/serve_chat.sh           # 另开一个终端，默认 :8080"
+echo "  然后浏览器打开 http://<服务器IP>:8080/"
+echo "  （服务已带 --allowed-origins ${ALLOWED_ORIGINS:-*}，跨域已放行）"
 echo ""
 
 exec vllm "${ARGS[@]}"
