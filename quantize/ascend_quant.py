@@ -199,6 +199,8 @@ def main():
                          "默认关闭 —— 此时是【校准式 min/max 量化】（带校准的 RTN），"
                          "与 quantize/w8a8_smooth.py 的 SmoothQuant 不是同一个算法。"
                          "打开后才真正做激活离群抑制。")
+    ap.add_argument("--debug", action="store_true",
+                    help="失败时打印完整的异常链与调用栈（定位 msModelSlim 内部问题用）")
     args = ap.parse_args()
 
     config.ensure_dirs()
@@ -297,10 +299,24 @@ def main():
             fn()
             print(f"[OK] 量化成功（{tag}）")
             return True
-        except TypeError as e:
-            attempts.append(f"{tag}: TypeError {str(e)[:200]}")
         except Exception as e:
             attempts.append(f"{tag}: {type(e).__name__} {str(e)[:200]}")
+            # ★ msModelSlim 用 `raise Exception(...) from e` 包了一层，
+            #   真正的调用栈在 __cause__ 里。只打印 str(e) 会丢掉关键信息，
+            #   所以这里把每一层的 traceback 都打出来。
+            if args.debug:
+                import traceback
+                print(f"\n[DEBUG] 完整调用栈（{tag}）:")
+                cur, depth = e, 0
+                while cur is not None and depth < 6:
+                    print(f"  ── 异常链第 {depth} 层: {type(cur).__name__}: {str(cur)[:300]}")
+                    tb = "".join(traceback.format_exception(
+                        type(cur), cur, cur.__traceback__))
+                    for line in tb.strip().splitlines()[-25:]:
+                        print("     " + line)
+                    cur = cur.__cause__ or cur.__context__
+                    depth += 1
+                print()
         return False
 
     def make_api(disable, dev_type, do_smooth, calib_data):
