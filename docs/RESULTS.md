@@ -193,6 +193,52 @@ The decoder prompt (length 512) plus the number of requested output tokens
 ```
 - `max_model_len` 必须 **> 输入长度**（要留出至少 1 个输出 token）
 
+### 4.7 msModelSlim 的 calib_data 必须是「单元素 tuple 的列表」
+```
+TypeError: Qwen3_5ForConditionalGeneration.forward() takes from 1 to N
+           positional arguments but M were given
+msmodelslim WARNING: Not all elements in calib_data are torch.Tensor,
+           please make sure that the model can run with `model(*(calib_data[0]))`
+```
+- msModelSlim 内部按 **`model(*(calib_data[i]))`** 调用校准数据
+- 若传 `[[101, 234, ...], ...]`（token id 的**列表的列表**），
+  那条 2048 个 id 会被**当成 2048 个位置参数展开** → TypeError
+- **正确格式**：`[(input_ids_tensor,), ...]`（每条包成单元素 tuple）
+  → `model(*(t,))` = `model(t)` ✓
+- 教训：警告文字本身已经把调用方式写出来了，**先读警告再猜 API**
+
+### 4.8 msModelSlim 的 `dev_type` 默认是 `cpu`，不是 `npu`
+```
+msmodelslim WARNING - Model is not on the device indicated in `QuantConfig`,
+  Model is on the device `npu:0` while `QuantConfig` indicates `cpu`
+msmodelslim INFO - Transferring model from `npu:0` to `cpu`...
+```
+- `QuantConfig(dev_type='cpu')` 是**默认值**。不显式传 `npu` 的话，
+  模型刚在 NPU 上加载好就被搬回 CPU，白等一次搬运
+- 实测签名（26.1.0，msModelSlim 失败时会自己打印）：
+  ```
+  QuantConfig(w_bit=8, a_bit=8, act_method=1, w_method='MinMax',
+              disable_names=None, pr=1.0, mm_tensor=True, dev_type='cpu',
+              dev_id=None, ..., w_sym=True, is_lowbit=False, do_smooth=False,
+              use_sigma=False, ..., disable_last_linear=True,
+              open_outlier=True, is_dynamic=False, group_size=64,
+              percdamp=0.01, pdmix=False)
+  Calibrator(self, model, cfg, calib_data=None, disable_level='L0',
+             all_tensors=None, mix_cfg=None)
+  ```
+
+### 4.9 ★ `do_smooth` 默认为 False —— msModelSlim 的 W8A8 默认**不含平滑**
+- 上面签名里的 `do_smooth: bool = False` 是**确证**：msModelSlim **有**平滑能力，
+  但**默认关闭**；`w_method='MinMax'` 说明权重走的也是 min/max 统计
+- 因此 `ascend_quant.py`（不传 do_smooth）产出的是
+  **「校准式 min/max 量化」= 带校准的 RTN**，与 `w8a8_smooth.py` 的
+  SmoothQuant **不是同一个算法**
+- 这给了一个**比跨库对比更干净的对照实验**（同一库、同一代码路径，只翻一个开关）：
+  ```bash
+  python quantize/ascend_quant.py --scheme W8A8            # do_smooth=False（RTN 行为）
+  python quantize/ascend_quant.py --scheme W8A8 --smooth   # do_smooth=True（平滑）
+  ```
+
 ---
 
 ## 5. 待补充

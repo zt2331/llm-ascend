@@ -129,14 +129,30 @@ def _import_msmodelslim():
 
 
 def build_calib(tok, calib_n, seq):
+    """构造 msModelSlim 的 calib_data。
+
+    ★ 格式要求（实测踩坑，务必保持）：
+      msModelSlim 内部按 `model(*(calib_data[i]))` 调用校准数据，因此每个元素
+      必须是「能被解包成 forward 位置参数的容器」，且其中每一项要是 torch.Tensor。
+
+        传 [(ids_tensor,), ...]  →  model(*(ids_tensor,)) = model(ids_tensor)  ✓
+        传 [ids_list, ...]       →  model(*ids_list)，把 2048 个 token id
+                                   当成 2048 个位置参数展开                ✗
+          报错: TypeError: ....forward() takes from 1 to N positional arguments
+          msModelSlim 同时会警告: "Not all elements in calib_data are torch.Tensor"
+
+      所以这里每一条都包成 **单元素 tuple**。
+    """
+    import torch
     from utils.dataio import Dataset
+
     pq = config.CALIB_PARQUET
     full = Dataset.from_parquet(pq)
     rows = full.select(range(min(calib_n, len(full))))
     data = []
     for r in rows:
         ids = tok(r["text"], truncation=True, max_length=seq)["input_ids"]
-        data.append(ids)
+        data.append((torch.tensor(ids, dtype=torch.long),))
     return data
 
 
@@ -147,6 +163,11 @@ def main():
     ap.add_argument("--calib", type=int, default=32)
     ap.add_argument("--seq", type=int, default=2048)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--smooth", action="store_true",
+                    help="启用 msModelSlim 的平滑（do_smooth=True）。"
+                         "默认关闭 —— 此时是【校准式 min/max 量化】（带校准的 RTN），"
+                         "与 quantize/w8a8_smooth.py 的 SmoothQuant 不是同一个算法。"
+                         "打开后才真正做激活离群抑制。")
     args = ap.parse_args()
 
     config.ensure_dirs()
@@ -195,19 +216,11 @@ def main():
     if skip_linear_names:
         print(f"       示例: {skip_linear_names[:3]}")
 
-    # msModelSlim 各版本对名字前缀要求不同，准备多种格式依次尝试
-    def _strip_prefix(names, prefix):
-        out = []
-        for n in names:
-            out.append(n[len(prefix):] if prefix and n.startswith(prefix) else n)
-        return out
-
-    disable_variants = [
-        ("完整 Linear 名", skip_linear_names),
-        ("去掉 model. 前缀", _strip_prefix(skip_linear_names, "model.")),
-        ("仅 lm_head", [n for n in skip_linear_names if n.endswith("lm_head")]),
-        ("不跳过（仅调试）", []),
-    ]
+    # ★ disable_names 的格式已实测确认：**必须用带 `model.` 前缀的完整 Linear 名**。
+    #   - "model.visual.blocks.0.attn.qkv"  → 通过校验 ✓
+    #   - "visual.blocks.0.attn.qkv"（去掉前缀）→ ValueError: disable_names has
+    #     invalid key `visual.blocks.0.attn.qkv` ✗
+    #   所以不再尝试多种前缀变体，直接用 skip_linear_names。
 
     w_bit, a_bit = (8, 8) if args.scheme == "W8A8" else (8, 16)
     if args.scheme == "W4A16":
@@ -215,7 +228,31 @@ def main():
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # ---- 多版本 API 兼容尝试 ----
+    # ---- 调用 ----
+    # ★ 签名已实测确认（msModelSlim 会在失败时自己打印出来）：
+    #   QuantConfig(w_bit=8, a_bit=8, act_method=1, w_method='MinMax',
+    #               disable_names=None, pr=1.0, mm_tensor=True,
+    #               dev_type='cpu', dev_id=None, ..., w_sym=True,
+    #               is_lowbit=False, do_smooth=False, use_sigma=False, ...,
+    #               disable_last_linear=True, ..., open_outlier=True,
+    #               is_dynamic=False, group_size=64, percdamp=0.01, pdmix=False)
+    #   Calibrator(self, model, cfg, calib_data=None, disable_level='L0',
+    #              all_tensors=None, mix_cfg=None)
+    #   注意 dev_type 默认就是 'cpu'（不是 npu！），不显式传 npu 的话
+    #   msModelSlim 会把已经加载到 NPU 上的模型再搬回 CPU，白白多花时间。
+    import inspect
+    _qc_params = set(inspect.signature(QuantConfig).parameters)
+    print(f"[INFO] QuantConfig 支持 dev_type={'dev_type' in _qc_params}, "
+          f"do_smooth={'do_smooth' in _qc_params}, "
+          f"open_outlier={'open_outlier' in _qc_params}")
+
+    if args.smooth and "do_smooth" not in _qc_params:
+        print("[FAIL] 该版本 QuantConfig 没有 do_smooth 参数，无法启用平滑；"
+              "请改用 python quantize/w8a8_smooth.py（llm-compressor SmoothQuant）")
+        return 2
+    if args.smooth:
+        print("[INFO] do_smooth=True → 启用平滑（激活离群抑制）")
+
     attempts = []
 
     def _try(fn, tag):
@@ -224,34 +261,33 @@ def main():
             print(f"[OK] 量化成功（{tag}）")
             return True
         except TypeError as e:
-            attempts.append(f"{tag}: TypeError {str(e)[:180]}")
+            attempts.append(f"{tag}: TypeError {str(e)[:200]}")
         except Exception as e:
-            attempts.append(f"{tag}: {type(e).__name__} {str(e)[:180]}")
+            attempts.append(f"{tag}: {type(e).__name__} {str(e)[:200]}")
         return False
 
-    def make_api(disable, dev_type, use_calib):
+    def make_api(disable, dev_type, do_smooth):
         def api():
             kwargs = dict(w_bit=w_bit, a_bit=a_bit)
+            if "dev_type" in _qc_params:
+                kwargs["dev_type"] = dev_type
+            if "do_smooth" in _qc_params:
+                kwargs["do_smooth"] = do_smooth
             if disable:
                 kwargs["disable_names"] = disable
-            if dev_type:
-                kwargs["dev_type"] = dev_type
             qc = QuantConfig(**kwargs)
-            if use_calib:
-                cal = Calibrator(model, qc, calib_data=calib)
-            else:
-                cal = Calibrator(model, qc, calib_data=calib, disable_level="L0")
+            cal = Calibrator(model, qc, calib_data=calib)
             cal.run()
             cal.save(out_dir, save_type=["safe_tensor"])
         return api
 
-    dev_type = "npu" if dev.has_npu() else "cpu"
-    plan = []
-    for label, names in disable_variants:
-        plan.append((make_api(names, dev_type, True), f"Calibrator(calib_data) + {label}"))
-    # 再来一轮：不带 dev_type（用默认），兼容老版本
-    for label, names in disable_variants[:2]:
-        plan.append((make_api(names, None, False), f"Calibrator(disable_level) + {label}"))
+    npu_dev = "npu" if dev.has_npu() else "cpu"
+    plan = [
+        (make_api(skip_linear_names, npu_dev, args.smooth),
+         f"dev_type={npu_dev}, do_smooth={args.smooth}"),
+        (make_api(skip_linear_names, "cpu", args.smooth),
+         f"dev_type=cpu, do_smooth={args.smooth}"),
+    ]
 
     for fn, tag in plan:
         if _try(fn, tag):
