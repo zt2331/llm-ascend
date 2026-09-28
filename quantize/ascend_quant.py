@@ -200,7 +200,8 @@ def main():
                          "与 quantize/w8a8_smooth.py 的 SmoothQuant 不是同一个算法。"
                          "打开后才真正做激活离群抑制。")
     ap.add_argument("--debug", action="store_true",
-                    help="失败时打印完整的异常链与调用栈（定位 msModelSlim 内部问题用）")
+                    help="只尝试第一种方案，不做 cpu 兜底（避免调试时让大模型在 CPU 上重跑一遍）。"
+                         "失败时的完整调用栈默认就会打印，无需此开关。")
     args = ap.parse_args()
 
     config.ensure_dirs()
@@ -302,21 +303,23 @@ def main():
         except Exception as e:
             attempts.append(f"{tag}: {type(e).__name__} {str(e)[:200]}")
             # ★ msModelSlim 用 `raise Exception(...) from e` 包了一层，
-            #   真正的调用栈在 __cause__ 里。只打印 str(e) 会丢掉关键信息，
-            #   所以这里把每一层的 traceback 都打出来。
-            if args.debug:
-                import traceback
-                print(f"\n[DEBUG] 完整调用栈（{tag}）:")
-                cur, depth = e, 0
-                while cur is not None and depth < 6:
-                    print(f"  ── 异常链第 {depth} 层: {type(cur).__name__}: {str(cur)[:300]}")
-                    tb = "".join(traceback.format_exception(
-                        type(cur), cur, cur.__traceback__))
-                    for line in tb.strip().splitlines()[-25:]:
-                        print("     " + line)
-                    cur = cur.__cause__ or cur.__context__
-                    depth += 1
+            #   真正的调用栈在 __cause__ 里。只打印 str(e) 会丢掉关键信息。
+            #   ★ 默认就打印（不靠 --debug）：失败输出本身就是诊断信息，
+            #     之前因为要记得加参数，白白多跑了一轮 27B。
+            import traceback
+            print(f"\n{'='*70}\n[调用栈] {tag}\n{'='*70}")
+            cur, depth = e, 0
+            seen = set()
+            while cur is not None and depth < 6 and id(cur) not in seen:
+                seen.add(id(cur))
+                print(f"── 异常链第 {depth} 层: {type(cur).__name__}: {str(cur)[:300]}")
+                tb = "".join(traceback.format_exception(
+                    type(cur), cur, cur.__traceback__))
+                for line in tb.strip().splitlines()[-30:]:
+                    print("   " + line)
                 print()
+                cur = cur.__cause__ or cur.__context__
+                depth += 1
         return False
 
     def make_api(disable, dev_type, do_smooth, calib_data):
@@ -341,8 +344,9 @@ def main():
     plan = [(make_api(skip_linear_names, npu_dev, args.smooth,
                       move_calib(calib_cpu, npu_dev)),
              f"dev_type={npu_dev}, calib_on={npu_dev}, do_smooth={args.smooth}")]
-    if npu_dev != "cpu":
-        # 兜底：dev_type=cpu（会把模型搬回 CPU，很慢，仅在前者失败时用）
+    if npu_dev != "cpu" and not args.debug:
+        # 兜底：dev_type=cpu（会把模型搬回 CPU，很慢）。--debug 时跳过，
+        # 免得调试期间让 27B 在 CPU 上白跑一遍。
         plan.append((make_api(skip_linear_names, "cpu", args.smooth,
                               move_calib(calib_cpu, "cpu")),
                      f"dev_type=cpu, calib_on=cpu, do_smooth={args.smooth}"))
