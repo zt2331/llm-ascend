@@ -279,9 +279,11 @@ def main():
     #   torch_npu 的 CPU fallback 在本环境会抛
     #   "Allocator for npu is not a DeviceAllocator"，且慢到 88 秒/层。
     #   这里把它改成显式在 CPU 上算再搬回，见 utils/npu_compat.py。
-    if args.method in ("gptq", "gptq8"):
+    #   注：设备由 patch_needed("auto") 自动探测（npu/cuda/cpu），
+    #      本脚本没有 --device 参数，也不会去改变 llm-compressor 自己的设备放置。
+    if args.method == "gptq":
         from utils.npu_compat import patch_needed
-        patch_needed(args.device)
+        patch_needed("auto")
 
     try:
         oneshot(model=model_path, output_dir=out_dir, recipe=recipe, dataset=loader,
