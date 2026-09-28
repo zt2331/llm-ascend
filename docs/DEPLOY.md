@@ -161,7 +161,8 @@ bash scripts/serve_chat.sh 8080
 | `max_num_seqs exceeds available Mamba cache blocks (N)` | Qwen3.6 是 Mamba 混合架构，每序列占一个 block。按报错里的 N 调小 `MAX_NUM_SEQS` |
 | `Expected Qwen3_5Config, but found Qwen3_5TextConfig` | 用了**没恢复 wrapper** 的目录。改用 `-mm` 目录 |
 | PPL 全是 nan | 同上：`weight_scale` 没加载上。先 `python -m utils.quant_check <目录>` |
-| 浏览器报 CORS | vLLM 缺 `--allowed-origins '*'`。`serve_ascend.sh` 已默认加上 |
+| `argument --allowed-origins: invalid loads value: '*'` | ★该参数要的是 **JSON 数组**，必须写 `'["*"]'` 而不是 `'*'`。`serve_ascend.sh` 已修正默认值 |
+| 浏览器报 CORS | vLLM 缺 `--allowed-origins`。脚本已默认带上 `["*"]`；若要限定来源：`ALLOWED_ORIGINS='["http://10.0.0.5:8080"]'` |
 | 显存不够 | 加 `LANGUAGE_MODEL_ONLY=1`（跳过视觉塔，省几个 GB） |
 | `npu-smi info` 报 `-9005` | **无害**，是容器内 DCMI 管理接口不通，与计算无关。用 `torch.npu.memory_allocated()` 看显存即可 |
 

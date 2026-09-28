@@ -17,8 +17,14 @@
 #                           每序列占一个 Mamba cache block。设太大报
 #                           "max_num_seqs exceeds available Mamba cache blocks (N)"，
 #                           按报错里的 N 调小即可）
-#   ALLOWED_ORIGINS         允许的跨域来源，默认 "*"（聊天网页需要）
-#   ENABLE_PREFIX_CACHING   默认 1，多轮对话复用 prefix 可显著降 TTFT
+#   ALLOWED_ORIGINS         允许的跨域来源。★vLLM 要的是 **JSON 数组**，
+#                           所以默认值是 ["*"] 而不是裸的 *（写 * 会报
+#                           "argument --allowed-origins: invalid loads value: '*'"）。
+#                           限定来源示例: ALLOWED_ORIGINS='["http://10.0.0.5:8080"]'
+#   ENABLE_PREFIX_CACHING   默认 0（不传该 flag）。vLLM V1 本来就默认开启
+#                           prefix caching，显式传属于"收益为零、风险非零"——
+#                           万一该版本没有这个 flag，服务会直接起不来。
+#                           想显式声明时设为 1。
 #
 # 说明:
 #   vllm-ascend 以插件形式注册 NPU 平台，安装后 `vllm serve` 默认走 NPU。
@@ -38,17 +44,21 @@ if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
 fi
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 
+# ★ vLLM 的 --allowed-origins 要求 JSON 数组，裸 * 会被 argparse 拒绝：
+#     error: argument --allowed-origins: invalid loads value: '*'
+ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-[\"*\"]}"
+
 ARGS=(serve "$MODEL" --host 0.0.0.0 --port "$PORT"
       --trust-remote-code --dtype "${DTYPE:-bfloat16}"
       --max-model-len "${MAX_MODEL_LEN:-4096}"
       --gpu-memory-utilization "${GMU:-0.90}"
       --max-num-seqs "${MAX_NUM_SEQS:-8}"
-      --allowed-origins "${ALLOWED_ORIGINS:-*}")
+      --allowed-origins "$ALLOWED_ORIGINS")
 if [ -n "$QUANT" ]; then
   ARGS+=(--quantization "$QUANT")
 fi
 # prefix caching：多轮聊天复用历史 KV，TTFT 明显下降
-if [ "${ENABLE_PREFIX_CACHING:-1}" = "1" ]; then
+if [ "${ENABLE_PREFIX_CACHING:-0}" = "1" ]; then
   ARGS+=(--enable-prefix-caching)
 fi
 
@@ -87,7 +97,7 @@ echo ""
 echo "★ 聊天网页（显示 prefill / decode 速度）:"
 echo "  bash scripts/serve_chat.sh           # 另开一个终端，默认 :8080"
 echo "  然后浏览器打开 http://<服务器IP>:8080/"
-echo "  （服务已带 --allowed-origins ${ALLOWED_ORIGINS:-*}，跨域已放行）"
+echo "  （服务已带 --allowed-origins $ALLOWED_ORIGINS，跨域已放行）"
 echo ""
 
 exec vllm "${ARGS[@]}"
