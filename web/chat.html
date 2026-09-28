@@ -32,9 +32,14 @@
   button.primary:disabled{opacity:.5; cursor:not-allowed}
   button.ghost{background:transparent}
   .grow{flex:1}
-  #addr{width:230px}
+  #addr{width:300px}
   #stat{font-size:12px; color:var(--dim)}
   #stat.ok{color:var(--ok)} #stat.err{color:var(--err)}
+  #noteBox{
+    display:none; white-space:pre-wrap; font-size:12.5px; line-height:1.7;
+    padding:10px 16px; background:#1c2333; border-bottom:1px solid var(--line);
+    color:#b9c4d6; font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
 
   main{flex:1; display:flex; min-height:0}
   #chatcol{flex:1; display:flex; flex-direction:column; min-width:0}
@@ -97,7 +102,7 @@
 
 <header>
   <h1>推理性能对话台</h1>
-  <input id="addr" value="http://127.0.0.1:8000" placeholder="vLLM 地址">
+  <input id="addr" value="" placeholder="vLLM 地址（连接失败时会给出排查提示）">
   <select id="model"><option value="">（点“连接”获取模型）</option></select>
   <button id="conn" class="primary">连接</button>
   <span id="stat">未连接</span>
@@ -108,6 +113,7 @@
     <input id="temp" type="number" value="0" step="0.1" min="0" style="width:60px"></label>
   <button id="bench" class="ghost" title="用固定问题连发 N 次，统计波动">压测 ×5</button>
 </header>
+<div id="noteBox"></div>
 
 <main>
   <div id="chatcol">
@@ -153,12 +159,43 @@ let running = false;
 const runs = [];   // 每轮指标
 
 // ---------- 连接 ----------
+// ★ 默认地址自动推断：云 IDE（如华为云 online-*.huawei.com）会把端口
+//   代理到 https://<host>/proxy/<port>/ 下。此时浏览器里的 127.0.0.1
+//   是【浏览器自己的机器】，根本连不到容器里的 vLLM；而且 HTTPS 页面请求
+//   HTTP 会被按混合内容直接拦掉（表现为 "Failed to fetch"）。
+//   所以：页面若在 /proxy/<port>/ 下，就把同源的 /proxy/8000 作为默认值。
+function guessBase() {
+  const u = new URL(location.href);
+  const m = u.pathname.match(/^(.*\/proxy\/)(\d+)(\/|$)/);
+  if (m) return `${u.origin}${m[1]}8000`;          // 同源代理下的 8000
+  if (u.protocol === "https:")
+    return `${u.origin}`;                          // https 下不能写 http 直连
+  return `${u.protocol}//${u.hostname}:8000`;
+}
+
+const VLLM_PORT = "8000";
+function applyGuess() {
+  const g = guessBase();
+  $("addr").value = g;
+  const u = new URL(location.href);
+  if (u.pathname.includes("/proxy/")) {
+    note(`检测到云 IDE 代理访问，已把地址预填为同源代理 ${g}
+若你的 vLLM 不在 ${VLLM_PORT} 端口，请手动改成 /proxy/<实际端口>`);
+  }
+}
+function note(text) {
+  const box = $("noteBox");
+  box.textContent = text;
+  box.style.display = "block";
+}
+
 async function connect(){
   const base = $("addr").value.replace(/\/+$/,"");
   $("stat").textContent = "连接中…"; $("stat").className = "";
+  $("noteBox").style.display = "none";
   try{
     const r = await fetch(base + "/v1/models", {cache:"no-store"});
-    if(!r.ok) throw new Error("HTTP " + r.status);
+    if(!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0,120));
     const d = await r.json();
     const ids = (d.data||[]).map(m=>m.id);
     if(!ids.length) throw new Error("返回里没有模型");
@@ -169,7 +206,33 @@ async function connect(){
   }catch(e){
     $("stat").textContent = "连接失败: " + e.message;
     $("stat").className = "err";
+    note(diagnose(e, base));
   }
+}
+
+// 把 "Failed to fetch" 这种无信息量的报错翻译成可操作的原因
+function diagnose(e, base) {
+  const u = new URL(location.href);
+  const lines = [`连接 ${base}/v1/models 失败：${e.message}`, ""];
+  if (e.message.includes("Failed to fetch")) {
+    lines.push("「Failed to fetch」的常见原因（按可能性排序）：");
+    if (/^https:/.test(base) === false && u.protocol === "https:")
+      lines.push("  1. ★ 页面是 HTTPS，却要请求 HTTP —— 浏览器按「混合内容」直接拦截。"
+                 + "请改用 https 的代理地址（如 https://<host>/proxy/8000）");
+    if (/127\.0\.0\.1|localhost/.test(base))
+      lines.push("  2. ★ 地址里的 127.0.0.1 是【浏览器所在机器】，不是服务器。"
+                 + "在云 IDE/远程环境里它连不到容器内的 vLLM");
+    lines.push("  3. vLLM 服务没起来 —— 在服务器上执行："
+               + " curl -s http://127.0.0.1:8000/v1/models");
+    lines.push("  4. 直连时被 CORS 拦 —— vLLM 需要 --allowed-origins '[\"*\"]'");
+  } else if (e.message.includes("404")) {
+    lines.push("404 通常是代理路径不对：确认地址带了 /proxy/<端口> 前缀，"
+               + "且端口与 vLLM 实际监听端口一致。");
+  }
+  lines.push("");
+  lines.push("可直接在浏览器打开这个地址自测（应返回 JSON）：");
+  lines.push(`  ${base}/v1/models`);
+  return lines.join("\n");
 }
 let base_ = "";
 $("conn").onclick = connect;
@@ -303,6 +366,8 @@ async function send(){
     caret.remove();
     txt.textContent = "❌ " + e.message;
     txt.style.color = "var(--err)";
+    if (e.message.includes("Failed to fetch"))
+      note(diagnose(e, base_ || $("addr").value.replace(/\/+$/,"")));
   }finally{
     sending = false; $("send").disabled = false; $("input").focus();
   }
@@ -423,6 +488,7 @@ $("bench").onclick = async () => {
   }
 };
 
+applyGuess();
 connect();
 $("input").focus();
 </script>

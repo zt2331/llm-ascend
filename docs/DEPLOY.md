@@ -151,6 +151,35 @@ bash scripts/serve_chat.sh 8080
 > 流末尾还有 usage 块和 `[DONE]`，算进去会**低估 decode 速度约 20%**。
 > 这个坑是 `tests/test_chat_metrics.js` 抓出来的。
 
+### 3.1 云 IDE / 远程环境：地址必须走代理
+
+如果你是通过**华为云 online IDE**（或任何 `.../proxy/<port>/` 形式）访问页面，
+浏览器地址会长这样：
+
+```
+https://online-xxxx.huawei.com/proxy/8080/chat.html
+```
+
+此时**不能**把 vLLM 地址填成 `http://127.0.0.1:8000`，原因有二：
+
+1. **`127.0.0.1` 是「你浏览器所在机器」**，不是跑 vLLM 的那台服务器；
+2. 页面是 **HTTPS**，请求 HTTP 会被浏览器按**混合内容**直接拦掉。
+
+表现都是 `Failed to fetch`。**正确做法**：把端口换成 8000 的**同源代理地址**
+
+```
+https://online-xxxx.huawei.com/proxy/8000
+```
+
+> 页面会**自动推断**这个地址并预填（识别 `/proxy/<port>/` 前缀），
+> 一般不用手改。若 vLLM 不在 8000，改成 `/proxy/<实际端口>` 即可。
+>
+> 走代理时是**同源请求，根本不涉及 CORS**，所以 `--allowed-origins` 在
+> 这个场景下不是必需的（直连时才需要）。
+
+自测代理是否通：浏览器直接打开 `https://<host>/proxy/8000/v1/models`，
+能返回模型列表 JSON 就说明通了。
+
 ---
 
 ## 4. 踩坑速查（部署侧）
@@ -164,6 +193,7 @@ bash scripts/serve_chat.sh 8080
 | `argument --allowed-origins: invalid loads value: '*'` | ★该参数要的是 **JSON 数组**，必须写 `'["*"]'` 而不是 `'*'`。`serve_ascend.sh` 已修正默认值 |
 | `ValueError: Free memory on device (26/61 GiB) ... is less than desired GPU memory utilization (0.9, 55 GiB)` | **显存被别的进程占着**。注意 vLLM 是按 `gmu × 总量` 判定的，不是按空闲量。先跑 `python scripts/npu_mem.py` 看谁占着（不依赖坏掉的 npu-smi），再 `python scripts/npu_mem.py --kill` 清理 |
 | 浏览器报 CORS | vLLM 缺 `--allowed-origins`。脚本已默认带上 `["*"]`；若要限定来源：`ALLOWED_ORIGINS='["http://10.0.0.5:8080"]'` |
+| 页面报 **`Failed to fetch`** | ★最常见：① 地址填了 `127.0.0.1`（那是浏览器自己的机器）；② HTTPS 页面请求 HTTP 被按混合内容拦。**云 IDE 要用 `/proxy/8000` 同源代理地址**，见 §3.1 |
 | 显存不够 | 加 `LANGUAGE_MODEL_ONLY=1`（跳过视觉塔，省几个 GB） |
 | `npu-smi info` 报 `-9005` | **无害**，是容器内 DCMI 管理接口不通，与计算无关。用 `torch.npu.memory_allocated()` 看显存即可 |
 

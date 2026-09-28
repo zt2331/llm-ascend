@@ -81,7 +81,8 @@ function makeFetch() {
 }
 
 const sandbox = {
-  document, performance, console, Math, JSON, Date,
+  document, performance, console, Math, JSON, Date, URL,
+  location: { href: "http://127.0.0.1:8080/chat.html", protocol: "http:" },
   parseInt, parseFloat, isFinite, alert: () => {},
   TextEncoder, TextDecoder,
   setInterval, clearInterval,
@@ -92,9 +93,65 @@ sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
 // 加载被测脚本，并暴露内部函数
-vm.runInContext(code + "\n;globalThis.__ask = ask;globalThis.__setBase = v => { base_ = v; };", sandbox);
+vm.runInContext(code + `
+;globalThis.__ask = ask;
+globalThis.__setBase = v => { base_ = v; };
+globalThis.__guessBase = guessBase;
+globalThis.__diagnose = diagnose;
+globalThis.__setHref = h => {
+  location.href = h;
+  location.protocol = new URL(h).protocol;
+};
+`, sandbox);
 const ask = sandbox.__ask;
+const guessBase = sandbox.__guessBase;
 sandbox.__setBase("http://127.0.0.1:8000");
+
+// ---------- 地址推断：云 IDE 代理是最容易踩的场景 ----------
+function testGuessBase() {
+  console.log("=== 地址自动推断（guessBase）===");
+  const CASES = [
+    // 页面所在的 URL                                 期望的默认 vLLM 地址
+    ["http://127.0.0.1:8080/chat.html",
+     "http://127.0.0.1:8000"],
+    ["http://10.0.0.5:8080/chat.html",
+     "http://10.0.0.5:8000"],
+    // ★ 华为云 online IDE：端口被代理到 /proxy/<port>/ 下
+    ["https://online-sz01.hicomp.huawei.com/proxy/8080/chat.html",
+     "https://online-sz01.hicomp.huawei.com/proxy/8000"],
+    // 代理前缀带更深路径
+    ["https://x.example.com/a/b/proxy/8080/",
+     "https://x.example.com/a/b/proxy/8000"],
+    // 普通 https 站点：不能写 http 直连（会被按混合内容拦），退回同源
+    ["https://example.com/chat.html",
+     "https://example.com"],
+  ];
+  let bad = 0;
+  for (const [href, want] of CASES) {
+    sandbox.__setHref(href);
+    const got = guessBase();
+    const ok = got === want;
+    console.log(`  ${ok ? "✅" : "❌"} ${href}\n       → ${got}${ok ? "" : `  (期望 ${want})`}`);
+    ok ? pass++ : (fail++, bad++);
+  }
+  return bad;
+}
+
+// 诊断信息应当能识别出「127.0.0.1」与「混合内容」这两个真凶
+function testDiagnose() {
+  console.log("\n=== 失败诊断（diagnose）===");
+  sandbox.__setHref("https://online-sz01.hicomp.huawei.com/proxy/8080/chat.html");
+  const t1 = sandbox.__diagnose(new Error("Failed to fetch"), "http://127.0.0.1:8000");
+  const checks = [
+    ["识别出 127.0.0.1 不是服务器", t1.includes("127.0.0.1") && t1.includes("不是服务器")],
+    ["识别出 HTTPS→HTTP 混合内容", t1.includes("混合内容")],
+    ["给出自测地址", t1.includes("/v1/models")],
+  ];
+  for (const [name, ok] of checks) {
+    console.log(`  ${ok ? "✅" : "❌"} ${name}`);
+    ok ? pass++ : fail++;
+  }
+}
 
 // ---------- 构造一个典型流：prefill 300ms，然后 6 个 token 每 50ms 一个 ----------
 function buildPlan({ ttftMs, nTok, perTokMs, promptTokens }) {
@@ -120,6 +177,9 @@ function check(name, got, want, tol = TOL) {
 }
 
 (async () => {
+  testGuessBase();
+  testDiagnose();
+
   const CASES = [
     { ttftMs: 300, nTok: 6, perTokMs: 50, promptTokens: 512, label: "典型：512 in / 6 out" },
     { ttftMs: 800, nTok: 16, perTokMs: 25, promptTokens: 2048, label: "长 prompt、快速 decode" },
