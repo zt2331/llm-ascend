@@ -274,6 +274,15 @@ def main():
     print(f"校准样本 {len(rows)} 条，最大长度 {args.seq}\n")
 
     os.makedirs(out_dir, exist_ok=True)
+
+    # ★ GPTQ 会调 torch.cholesky_inverse 求 Hessian 逆，而昇腾 NPU 没实现该算子，
+    #   torch_npu 的 CPU fallback 在本环境会抛
+    #   "Allocator for npu is not a DeviceAllocator"，且慢到 88 秒/层。
+    #   这里把它改成显式在 CPU 上算再搬回，见 utils/npu_compat.py。
+    if args.method in ("gptq", "gptq8"):
+        from utils.npu_compat import patch_needed
+        patch_needed(args.device)
+
     try:
         oneshot(model=model_path, output_dir=out_dir, recipe=recipe, dataset=loader,
                 precision="auto", trust_remote_code_model=True, save_compressed=True)

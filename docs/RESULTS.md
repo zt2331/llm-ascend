@@ -131,6 +131,27 @@ Decompressing model: 100%|██| 256/256 [01:08<00:00, 3.74it/s]
 - 4bit 权重的**位解包**在 NPU 无实现 → 回退 CPU → 反量化耗时 **68 秒**（3.74 it/s）
 - **不报错，只是慢** —— 这类问题最容易被忽略
 
+### 4.1b 算子缺失 + fallback 有 bug → 直接崩（比 4.1 更严重）
+```
+[W] VariableFallbackKernel.cpp:250 Warning: CAUTION: The operator
+    'aten::cholesky_inverse' is not currently supported on the NPU backend
+    and will fall back to run on the CPU.
+...gptq_quantize.py:154:  H = torch.cholesky_inverse(H)
+[W] ArgSortKernelNpuOpApi.cpp:26 Warning: kernel [ArgSort] can not support
+    dtype int32 or int64 on AiCore, Now this kernel is running on AiCpu.
+2026-09-28T11:39:29 | GPTQ | METRIC - time 88.18s
+2026-09-28T11:39:29 | GPTQ | METRIC - error 0.28
+RuntimeError: device_allocator INTERNAL ASSERT FAILED at
+"/pytorch/c10/core/CachingDeviceAllocator.h":116
+Allocator for npu is not a DeviceAllocator.
+```
+- GPTQ 求 Hessian 逆用的 `aten::cholesky_inverse` 在 NPU 无实现 → torch_npu 的
+  **CPU fallback 路径本身有 bug** → 抛 `Allocator for npu is not a DeviceAllocator`
+- 后果不是「慢」，是**跑到第 1 层就崩**，且已耗掉 **88 秒/层**（64 层 ≈ 90 分钟白跑）
+- 与 4.1 的区别：4.1 是「能跑但慢」，这里是「**不能跑**」——同一根因（算子缺失）的两种后果
+- **解法**：不修 torch_npu，而是把该算子显式搬到 CPU 计算再搬回（`utils/npu_compat.py`）。
+  Hessian 是 `[in,in]` 方阵（5120²≈105MB / 17408²≈1.2GB），CPU 完全放得下
+
 ### 4.2 量化格式支持面窄
 ```
 NotImplementedError: No compressed-tensors compatible scheme was found

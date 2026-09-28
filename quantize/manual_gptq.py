@@ -204,7 +204,15 @@ def build_state_dict(model, xbuf, bits=4, group_size=128, percdamp=0.01,
         for name, mod in iter_linears_in(layer, PROJ_SUFFIXES):
             base = f"{pfx}.{i}.{name}"
             X = xbuf.get(base)
-            Q_int, Scale, Zero = gptq_quantize(mod.weight.detach().float(), X,
+            # ★ 必须把权重也搬到 CPU：
+            #  (1) 激活 X 本来就是 CPU（collect_linear_inputs 里 .cpu()，为省显存），
+            #      而 gptq_quantize 内部的 Q/Scale/Zero/H/Hinv 都在 CPU 上创建；
+            #      若 W 留在 NPU，会与它们 device mismatch（err=(w-dq)/d 等处直接报错）。
+            #  (2) 昇腾 NPU 没有实现 aten::cholesky_inverse，torch_npu 的 CPU fallback
+            #      在本环境会抛 "Allocator for npu is not a DeviceAllocator"。
+            #      全部放 CPU 就完全不触发 fallback，也顺带更快。
+            #  Hessian 是 [in,in] 方阵（5120²≈105MB / 17408²≈1.2GB），CPU 完全够用。
+            Q_int, Scale, Zero = gptq_quantize(mod.weight.detach().float().cpu(), X,
                                                bits, group_size, percdamp, blocksize)
             qw, qz, sc, gidx = pack_gptq(Q_int, Scale, Zero, bits, group_size)
             new[f"{base}.qweight"] = qw
