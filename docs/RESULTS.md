@@ -203,9 +203,38 @@ msmodelslim WARNING: Not all elements in calib_data are torch.Tensor,
 - msModelSlim 内部按 **`model(*(calib_data[i]))`** 调用校准数据
 - 若传 `[[101, 234, ...], ...]`（token id 的**列表的列表**），
   那条 2048 个 id 会被**当成 2048 个位置参数展开** → TypeError
-- **正确格式**：`[(input_ids_tensor,), ...]`（每条包成单元素 tuple）
-  → `model(*(t,))` = `model(t)` ✓
 - 教训：警告文字本身已经把调用方式写出来了，**先读警告再猜 API**
+
+> **最终正确格式（三层约束叠加，逐层试出来的）**：
+> ```python
+> calib_data = [ [torch.tensor(ids).unsqueeze(0)], ... ]
+> #              └─ list（非 tuple，msModelSlim 的类型校验）
+> #                    └─ 单元素（model(*x) 正好展开成 1 个位置参数）
+> #                              └─ [1, seq] 二维（必须带 batch 维！）
+> ```
+> 三层各自对应的报错：
+> | 写法 | 报错 |
+> |---|---|
+> | `[ids_list, ...]` | `TypeError: forward() takes from 1 to N positional arguments` |
+> | `[(tensor,), ...]` | `TypeError: calib_data[0] must be list or dict, not tuple.` |
+> | `[{"input_ids": t}, ...]` | `IndexError: tuple index out of range` |
+> | `[[tensor_1d], ...]` | `ValueError: not enough values to unpack (expected 3, got 2)` |
+> | `[[tensor_1xN], ...]` | ✅ |
+
+### 4.7b ★ batch 维缺失 → Qwen3.5 linear_attn 解包失败（最难定位的一个）
+```
+File ".../transformers/models/qwen3_5/modeling_qwen3_5.py", line 451, in forward
+    batch_size, seq_len, _ = hidden_states.shape
+ValueError: not enough values to unpack (expected 3, got 2)
+```
+- `input_ids` 传 **1 维** `[seq]` 时，embedding 输出是 **2 维** `[seq, hidden]`
+  → 解包成 3 个值失败
+- **必须补 batch 维**：`.unsqueeze(0)` → `[1, seq]` → hidden 变 3 维 `[1, seq, hidden]` ✓
+- 旁证：transformers 全程在警告
+  `The attention mask is not set with a batched input` —— 模型本来就期望 batched 输入
+- **定位方法**：msModelSlim 把原始异常用 `raise Exception(...) from e` 包了一层，
+  我们脚本最初只打印 `str(e)[:200]` 把栈丢了。改成遍历 `__cause__` / `__context__`
+  链后，一次就看到了真正的出错行
 
 ### 4.8 msModelSlim 的 `dev_type` 默认是 `cpu`，不是 `npu`
 ```

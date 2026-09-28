@@ -131,19 +131,24 @@ def _import_msmodelslim():
 def build_calib(tok, calib_n, seq, form="list"):
     """构造 msModelSlim 的 calib_data。
 
-    ★ 格式要求（两轮实测踩坑记录，务必保持）：
+    ★ 格式要求（三轮实测踩坑记录，务必保持）：
       1) msModelSlim 会校验 `calib_data[i]` 的类型，**只接受 list 或 dict**：
            传 tuple → TypeError: calib_data[0] must be list or dict, not tuple.
       2) 校验通过后按 `model(*(calib_data[i]))` 调用（其警告原文即如此），
-         所以容器里必须恰好是 forward 所需的位置参数，且要是 torch.Tensor。
+         所以容器里必须恰好是 forward 所需的位置参数。
+      3) ★ 张量必须**带 batch 维**，即 input_ids 形状为 [1, seq] 而不是 [seq]。
+         原因：Qwen3.5 的 linear_attn 里有
+             batch_size, seq_len, _ = hidden_states.shape
+         传 1 维 input_ids 时 embedding 输出只有 2 维 → 
+             ValueError: not enough values to unpack (expected 3, got 2)
+         （调用栈落在 modeling_qwen3_5.py 的 linear_attn.forward）
+      4) 张量还必须与模型**同设备**，否则 embedding 报 indices is on cpu。
 
-      三种写法对比：
-        form="list":  [ [ids_tensor], ... ]        → model(*[ids_tensor]) = model(ids_tensor)  ✓
-        form="dict":  [ {"input_ids": tensor}, ...] → model(**{...}) = model(input_ids=tensor) ✓
-        错误写法:      [ ids_list, ... ]            → model(*ids_list) 把 2048 个 token id
-                       当成 2048 个位置参数展开 → TypeError: forward() takes from 1 to N
-                       （同时警告 Not all elements in calib_data are torch.Tensor）
-        错误写法:      [ (ids_tensor,), ... ]       → TypeError: must be list or dict, not tuple.
+      四种写法对比：
+        [ [ids_1d], ... ]        → 2 维 hidden → 解包失败            ❌
+        [ [ids_1xN], ... ]       → 3 维 hidden → ✓                  ✅
+        [ [(ids,), ...] ]        → must be list or dict, not tuple. ❌
+        [ {"input_ids": ...} ]   → IndexError: tuple index out of range ❌
     """
     import torch
     from utils.dataio import Dataset
@@ -154,7 +159,8 @@ def build_calib(tok, calib_n, seq, form="list"):
     data = []
     for r in rows:
         ids = tok(r["text"], truncation=True, max_length=seq)["input_ids"]
-        t = torch.tensor(ids, dtype=torch.long)
+        # ★ .unsqueeze(0) 补 batch 维：[seq] → [1, seq]
+        t = torch.tensor(ids, dtype=torch.long).unsqueeze(0)
         if form == "dict":
             data.append({"input_ids": t})
         else:                                   # 默认 list：与 msModelSlim 的
