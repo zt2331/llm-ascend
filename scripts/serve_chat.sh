@@ -14,7 +14,8 @@
 #   浏览器:  http://<服务器IP>:8080/
 #
 # 注意: vLLM 侧必须允许跨域。serve_ascend.sh 已默认带
-#       --allowed-origins '*'，若你手工起 vllm，请自行加上该参数，
+#       --allowed-origins '["*"]'（★注意是 JSON 数组，不是裸的 *），
+#       若你手工起 vllm，请自行加上该参数
 #       否则浏览器控制台会报 CORS 错误。
 set -e
 cd "$(dirname "$0")/../web"
