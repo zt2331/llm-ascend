@@ -162,6 +162,31 @@ def build_calib(tok, calib_n, seq, form="list"):
     return data
 
 
+def move_calib(data, device):
+    """把校准张量搬到指定设备；非张量元素原样保留。
+
+    msModelSlim 明确提示 model 与 calib_data 要在同一设备上
+    （"check model and calib_data on the device that QuantConfig indicates"），
+    否则 forward 时 embedding 会报 "indices is on cpu"。
+    """
+    import torch
+    from utils import device as dev
+
+    if device in (None, "cpu"):
+        return data
+    tgt = dev.get_device("auto") if device == "npu" else device
+    out = []
+    for d in data:
+        if isinstance(d, list):
+            out.append([x.to(tgt) if isinstance(x, torch.Tensor) else x for x in d])
+        elif isinstance(d, dict):
+            out.append({k: (v.to(tgt) if isinstance(v, torch.Tensor) else v)
+                        for k, v in d.items()})
+        else:
+            out.append(d)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None)
@@ -202,10 +227,14 @@ def main():
 
     tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     model = load_model(model_path, prefer_device="auto", eval_mode=True)
-    # ★ 校准数据的两种合法形式（msModelSlim 只接受 list/dict，见 build_calib 注释）
-    calib_forms = [("list", build_calib(tok, args.calib, args.seq, "list")),
-                   ("dict", build_calib(tok, args.calib, args.seq, "dict"))]
-    print(f"[INFO] 校准样本 {len(calib_forms[0][1])} 条，最大长度 {args.seq}")
+
+    # ★ 校准数据必须是「单元素 list 的 list」（msModelSlim 只接受 list/dict，
+    #   且按 model(*(calib_data[i])) 调用），见 build_calib 注释。
+    # ★ 还必须与模型【同设备】：msModelSlim 明确提示
+    #   "check model and calib_data on the device that QuantConfig indicates"；
+    #   否则 forward 时 embedding 报 "indices is on cpu"。
+    calib_cpu = build_calib(tok, args.calib, args.seq, "list")
+    print(f"[INFO] 校准样本 {len(calib_cpu)} 条，最大长度 {args.seq}")
 
     # 不量化的层（lm_head / 视觉塔 / 混合线性注意力）
     # ★ msModelSlim 的 disable_names 只接受【具体 Linear 层】的名字，
@@ -290,15 +319,17 @@ def main():
         return api
 
     npu_dev = "npu" if dev.has_npu() else "cpu"
-    # 顺序：先 list 形式（与 msModelSlim 的 model(*(calib_data[i])) 语义一致），
-    #       失败再试 dict 形式；dev_type 先用 npu（模型已在 NPU 上，避免被搬回 CPU）
-    plan = []
-    for cform, cdata in calib_forms:
-        plan.append((make_api(skip_linear_names, npu_dev, args.smooth, cdata),
-                     f"calib={cform}, dev_type={npu_dev}, do_smooth={args.smooth}"))
-        if npu_dev != "cpu":
-            plan.append((make_api(skip_linear_names, "cpu", args.smooth, cdata),
-                         f"calib={cform}, dev_type=cpu, do_smooth={args.smooth}"))
+    # 校准数据形式固定为 list（实测确认：dict 形式报 IndexError: tuple index
+    # out of range；list 形式已经能跑到 forward）。这里只用 list，
+    # 但把校准张量放到与 dev_type 一致的设备上（否则 embedding 报 indices is on cpu）。
+    plan = [(make_api(skip_linear_names, npu_dev, args.smooth,
+                      move_calib(calib_cpu, npu_dev)),
+             f"dev_type={npu_dev}, calib_on={npu_dev}, do_smooth={args.smooth}")]
+    if npu_dev != "cpu":
+        # 兜底：dev_type=cpu（会把模型搬回 CPU，很慢，仅在前者失败时用）
+        plan.append((make_api(skip_linear_names, "cpu", args.smooth,
+                              move_calib(calib_cpu, "cpu")),
+                     f"dev_type=cpu, calib_on=cpu, do_smooth={args.smooth}"))
 
     for fn, tag in plan:
         if _try(fn, tag):
