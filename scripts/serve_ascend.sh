@@ -69,7 +69,30 @@ if [ "${LANGUAGE_MODEL_ONLY:-0}" = "1" ]; then
   echo "[INFO] 启用 --language-model-only（跳过视觉编码器）"
 fi
 
-# 若目录里残留多模态处理器文件但 config 是纯文本，vLLM 会报
+# ---- 启动前显存预检 ----
+# vLLM 的判定是 free >= gpu_memory_utilization × total（按【总量】比例算，
+# 不是按空闲算）。显存被别的进程占着时会抛：
+#   ValueError: Free memory on device (26.08/61.27 GiB) on startup is less than
+#   desired GPU memory utilization (0.9, 55.14 GiB)
+# 外加 60 行 traceback，根因被埋在最后。这里提前给一行结论。
+if [ "${SKIP_MEMCHECK:-0}" != "1" ]; then
+  set +e
+  python3 scripts/npu_mem.py --need-gmu "${GMU:-0.90}"
+  _memrc=$?
+  set -e
+  if [ "$_memrc" = "1" ]; then
+    echo ""
+    echo "[FAIL] 显存不足，vLLM 必定启动失败。释放方式（任选）："
+    echo "        python scripts/npu_mem.py           # 看谁占着 NPU"
+    echo "        python scripts/npu_mem.py --kill    # 交互式清理"
+    echo "        ps -ef | grep -E 'python|vllm'      # 常见：上一条命令没退出"
+    echo "        或降低 GMU / MAX_MODEL_LEN 后重试"
+    echo "        跳过本检查: SKIP_MEMCHECK=1 再加到命令前面"
+    exit 4
+  fi
+  echo ""
+fi
+
 #   TypeError: Expected Qwen3_5Config, but found Qwen3_5TextConfig
 # 检测并给出提示（不自动改，避免误删）
 if [ -f "$MODEL/config.json" ]; then
