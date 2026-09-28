@@ -96,7 +96,7 @@ vm.createContext(sandbox);
 vm.runInContext(code + `
 ;globalThis.__ask = ask;
 globalThis.__setBase = v => { base_ = v; };
-globalThis.__guessBase = guessBase;
+globalThis.__candidates = candidates;
 globalThis.__diagnose = diagnose;
 globalThis.__setHref = h => {
   location.href = h;
@@ -104,37 +104,39 @@ globalThis.__setHref = h => {
 };
 `, sandbox);
 const ask = sandbox.__ask;
-const guessBase = sandbox.__guessBase;
+const candidates = sandbox.__candidates;
 sandbox.__setBase("http://127.0.0.1:8000");
 
-// ---------- 地址推断：云 IDE 代理是最容易踩的场景 ----------
-function testGuessBase() {
-  console.log("=== 地址自动推断（guessBase）===");
+// ---------- 接口地址候选：云 IDE 代理是最容易踩的场景 ----------
+function testCandidates() {
+  console.log("=== 接口地址候选顺序（candidates）===");
   const CASES = [
-    // 页面所在的 URL                                 期望的默认 vLLM 地址
+    // 页面 URL                                     期望候选（按探测顺序）
     ["http://127.0.0.1:8080/chat.html",
-     "http://127.0.0.1:8000"],
+     ["http://127.0.0.1:8080", "http://127.0.0.1:8000"]],
     ["http://10.0.0.5:8080/chat.html",
-     "http://10.0.0.5:8000"],
-    // ★ 华为云 online IDE：端口被代理到 /proxy/<port>/ 下
+     ["http://10.0.0.5:8080", "http://10.0.0.5:8000"]],
+    // ★ 华为云 online IDE：中继模式下页面与 API 同在 /proxy/8080，
+    //   所以第一个候选是【页面目录】本身 —— 前缀不能丢
     ["https://online-sz01.hicomp.huawei.com/proxy/8080/chat.html",
-     "https://online-sz01.hicomp.huawei.com/proxy/8000"],
-    // 代理前缀带更深路径
+     ["https://online-sz01.hicomp.huawei.com/proxy/8080",
+      "https://online-sz01.hicomp.huawei.com/proxy/8000"]],
     ["https://x.example.com/a/b/proxy/8080/",
-     "https://x.example.com/a/b/proxy/8000"],
-    // 普通 https 站点：不能写 http 直连（会被按混合内容拦），退回同源
+     ["https://x.example.com/a/b/proxy/8080",
+      "https://x.example.com/a/b/proxy/8000"]],
+    // 普通 https 站点：不能写 http 直连（会被按混合内容拦）
     ["https://example.com/chat.html",
-     "https://example.com"],
+     ["https://example.com"]],
   ];
-  let bad = 0;
   for (const [href, want] of CASES) {
     sandbox.__setHref(href);
-    const got = guessBase();
-    const ok = got === want;
-    console.log(`  ${ok ? "✅" : "❌"} ${href}\n       → ${got}${ok ? "" : `  (期望 ${want})`}`);
-    ok ? pass++ : (fail++, bad++);
+    const got = candidates();
+    const ok = JSON.stringify(got) === JSON.stringify(want);
+    console.log(`  ${ok ? "✅" : "❌"} ${href}`);
+    console.log(`       → ${JSON.stringify(got)}`);
+    if (!ok) { console.log(`       (期望 ${JSON.stringify(want)})`); fail++; }
+    else pass++;
   }
-  return bad;
 }
 
 // 诊断信息应当能识别出「127.0.0.1」与「混合内容」这两个真凶
@@ -176,9 +178,32 @@ function check(name, got, want, tol = TOL) {
   ok ? pass++ : fail++;
 }
 
+
+// ★ 缓冲检测：前置代理攒齐 SSE 才发时必须标记出来，而不是显示假数字
+async function testBufferedDetection() {
+  console.log("\n=== 缓冲检测（buffered）===");
+  const cases = [
+    ["均匀流（正常）", { ttftMs: 300, nTok: 12, perTokMs: 50 }, false],
+    ["全部挤在末尾（被代理缓冲）",
+     { ttftMs: 2000, nTok: 200, perTokMs: 0 }, true],
+  ];
+  for (const [name, plan, want] of cases) {
+    VNOW = 0;
+    SSE_PLAN = buildPlan(plan);
+    const m = await ask("hi", null, null);
+    const ok = m.buffered === want;
+    const pct = (m.genMs / m.totalMs * 100).toFixed(1);
+    console.log(`  ${ok ? "✅" : "❌"} ${name}: genMs=${m.genMs.toFixed(0)} `
+      + `totalMs=${m.totalMs.toFixed(0)} (生成占比 ${pct}%) `
+      + `→ buffered=${m.buffered} (期望 ${want})`);
+    ok ? pass++ : fail++;
+  }
+}
+
 (async () => {
-  testGuessBase();
+  testCandidates();
   testDiagnose();
+  await testBufferedDetection();
 
   const CASES = [
     { ttftMs: 300, nTok: 6, perTokMs: 50, promptTokens: 512, label: "典型：512 in / 6 out" },

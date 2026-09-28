@@ -127,14 +127,14 @@ MAX_NUM_SEQS=8 MAX_MODEL_LEN=4096 LANGUAGE_MODEL_ONLY=1 \
 # 终端 1：推理服务
 bash scripts/serve_ascend.sh <模型目录> compressed-tensors 8000
 
-# 终端 2：网页（静态托管，零依赖）
+# 终端 2：聊天页 + 流式反代（★不是普通静态服务器，见 §3.2）
 bash scripts/serve_chat.sh 8080
 ```
 
-浏览器打开 `http://<服务器IP>:8080/`，页面上把「vLLM 地址」填成
-`http://<服务器IP>:8000`，点**连接**，然后就能对话。
+访问：直连环境 `http://<服务器IP>:8080/`；云 IDE `https://<host>/proxy/8080/`。
+页面会**自动探测**接口地址，一般无需手填。
 
-**页面会显示每轮的**：
+**页面显示每轮**：
 
 | 指标 | 含义 |
 |---|---|
@@ -144,8 +144,42 @@ bash scripts/serve_chat.sh 8080
 | 输入/输出 tokens | 取自服务端 `usage`（精确，不是估算） |
 | 总耗时 / 生成阶段 | 端到端 vs 纯生成 |
 
-还有「压测 ×5」按钮：同一问题连发 5 次，输出 avg / p50 / p95，
-用来看抖动。
+另有两个开关：**思考模式**（默认关，关闭时发送
+`chat_template_kwargs: {"enable_thinking": false}`，不再输出一长段思维链）、
+**压测 ×5**（同问题连发 5 次，输出 avg / p50 / p95）。
+
+### 3.2 ★ 为什么不能只用 `python -m http.server`
+
+云 IDE 把端口代理到 `/proxy/<port>/` 下，那层反向代理（多为 nginx）
+**默认开启 `proxy_buffering`**：它会把 vLLM 的 SSE 流**攒齐再一次性**发给浏览器。
+
+一旦被缓冲，页面上的数字**全是假的**：
+
+| 指标 | 假象 | 真实原因 |
+|---|---|---|
+| TTFT | 36.11 s | 其实是**整个生成耗时**（首个 chunk 直到最后才到） |
+| Decode | **3207.9 tok/s** | 27B 模型不可能——所有 token 在同一瞬间到达 |
+| 生成阶段 | 319 ms | 1024 个 token 挤在 319ms 内到达 = 非流式 |
+
+**解法**：`scripts/serve_chat.sh` 起的是 `scripts/chat_relay.py`，
+一个**页面 + 流式反向代理**的中继：
+
+```
+浏览器 ──HTTPS──> 云IDE代理 ──HTTP──> chat_relay ──HTTP──> vLLM:8000
+```
+
+它从 vLLM 拿到 SSE 后**立刻逐块 flush**，并在响应头加
+**`X-Accel-Buffering: no`**（nginx 认这个头，客户端设不了），
+让前置代理不再缓冲。顺带把静态页一起托管 → **页面与接口同源，不需要 CORS**。
+
+**万一前置代理仍然缓冲**，页面会**明确标出**「⚠️ 检测到响应被缓冲」并说明
+TTFT/decode 不可信，而不是显示一个看起来很正常的假数字。判据：输出 ≥10 个
+token 但生成阶段占比 <5%（正常应占 60%+）。
+
+> 想直连不走代理测真实数字（在服务器上跑，不经过任何代理）：
+> ```bash
+> python scripts/loadtest.py --port 8000    # 直接打 127.0.0.1:8000
+> ```
 
 > **为什么 decode 用「末 token 时刻」而不是「流结束时刻」**：
 > 流末尾还有 usage 块和 `[DONE]`，算进去会**低估 decode 速度约 20%**。
@@ -193,7 +227,9 @@ https://online-xxxx.huawei.com/proxy/8000
 | `argument --allowed-origins: invalid loads value: '*'` | ★该参数要的是 **JSON 数组**，必须写 `'["*"]'` 而不是 `'*'`。`serve_ascend.sh` 已修正默认值 |
 | `ValueError: Free memory on device (26/61 GiB) ... is less than desired GPU memory utilization (0.9, 55 GiB)` | **显存被别的进程占着**。注意 vLLM 是按 `gmu × 总量` 判定的，不是按空闲量。先跑 `python scripts/npu_mem.py` 看谁占着（不依赖坏掉的 npu-smi），再 `python scripts/npu_mem.py --kill` 清理 |
 | 浏览器报 CORS | vLLM 缺 `--allowed-origins`。脚本已默认带上 `["*"]`；若要限定来源：`ALLOWED_ORIGINS='["http://10.0.0.5:8080"]'` |
-| 页面报 **`Failed to fetch`** | ★最常见：① 地址填了 `127.0.0.1`（那是浏览器自己的机器）；② HTTPS 页面请求 HTTP 被按混合内容拦。**云 IDE 要用 `/proxy/8000` 同源代理地址**，见 §3.1 |
+| 页面报 **`Failed to fetch`** | ★最常见：① 地址填了 `127.0.0.1`（那是浏览器自己的机器）；② HTTPS 页面请求 HTTP 被按混合内容拦。**用 `serve_chat.sh` 起中继即可自动解决**，见 §3.2 |
+| **TTFT 异常大、decode 上千 tok/s** | ★响应被前置代理缓冲了（不是流式到达）。用 `scripts/serve_chat.sh` 启动，它会加 `X-Accel-Buffering: no`；页面也会明确标出该轮数字不可信 |
+| 模型先输出一大段「思考过程」 | 思考模式。页面取消勾选「思考模式」即可（发送 `enable_thinking: false`）；或给 vLLM 加 `--default-chat-template-kwargs '{"enable_thinking": false}'` |
 | 显存不够 | 加 `LANGUAGE_MODEL_ONLY=1`（跳过视觉塔，省几个 GB） |
 | `npu-smi info` 报 `-9005` | **无害**，是容器内 DCMI 管理接口不通，与计算无关。用 `torch.npu.memory_allocated()` 看显存即可 |
 

@@ -64,10 +64,11 @@ MAX_NUM_SEQS=8 LANGUAGE_MODEL_ONLY=1 bash scripts/serve_ascend.sh \
     compressed-tensors 8000
 
 # 终端 2：聊天网页（单文件、零依赖、无需构建）
-bash scripts/serve_chat.sh 8080
+bash scripts/serve_chat.sh 8080   # 页面 + 流式反代（同一端口）
 ```
 
-浏览器打开 `http://<服务器IP>:8080/` → 填 vLLM 地址 → 点「连接」→ 直接对话。
+浏览器打开 `http://<服务器IP>:8080/`（云 IDE 用 `https://<host>/proxy/8080/`）
+→ 页面自动探测接口 → 直接对话。
 
 **每轮回答下方实时显示**：
 
@@ -80,7 +81,7 @@ bash scripts/serve_chat.sh 8080
 
 还有「压测 ×5」按钮输出 avg / p50 / p95，以及 decode 速度趋势图。
 
-> 完整部署清单（哪些模型能部署、哪些不能、每个的启动命令）见
+> 完整部署清单与启动命令见
 > **[`docs/DEPLOY.md`](docs/DEPLOY.md)**。
 >
 > 度量口径有测试保障：`node tests/test_chat_metrics.js`（用虚拟时钟 + 合成
@@ -251,7 +252,9 @@ llm_ascend/
 │   ├── 04_check_data.py       # 数据校验（数据固定，只检查不生成）
 │   ├── run_all.sh             # ★ 一键全流程
 │   ├── serve_ascend.sh        # vLLM(Ascend) 启动
-│   ├── serve_chat.sh          # ★ 聊天网页静态托管
+│   ├── serve_chat.sh          # ★ 聊天页 + 流式反代启动器
+│   ├── chat_relay.py          # ★ 静态托管 + vLLM SSE 反代（防代理缓冲）
+│   ├── npu_mem.py             # ★ 不依赖 npu-smi 的显存诊断
 │   └── loadtest.py            # 并发压测
 ├── deploy/
 │   ├── k8s.yaml               # 昇腾 NPU 的 Deployment/Service/HPA

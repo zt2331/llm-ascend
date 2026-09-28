@@ -81,6 +81,11 @@
     margin:0; padding:11px 14px; border-bottom:1px solid var(--line); font-weight:600;
   }
   #metrics{padding:12px 14px; border-bottom:1px solid var(--line)}
+  #m-warn{
+    display:none; white-space:pre-wrap; font-size:11.5px; line-height:1.6;
+    background:#3a2a12; border:1px solid #6b4a15; color:#f0c674;
+    border-radius:6px; padding:8px 10px; margin-bottom:10px;
+  }
   .kv{display:flex; justify-content:space-between; padding:3px 0; font-size:13px;
       font-variant-numeric:tabular-nums}
   .kv span:first-child{color:var(--dim)}
@@ -111,6 +116,8 @@
     <input id="maxtok" type="number" value="256" min="1" style="width:74px"></label>
   <label style="font-size:12px;color:var(--dim)">temp
     <input id="temp" type="number" value="0" step="0.1" min="0" style="width:60px"></label>
+  <label style="font-size:12px;color:var(--dim)" title="关闭后发送 chat_template_kwargs.enable_thinking=false，模型不再输出思维链">
+    <input id="think" type="checkbox"> 思考模式</label>
   <button id="bench" class="ghost" title="用固定问题连发 N 次，统计波动">压测 ×5</button>
 </header>
 <div id="noteBox"></div>
@@ -134,6 +141,7 @@
   <aside>
     <h2>本轮指标</h2>
     <div id="metrics">
+      <div id="m-warn"></div>
       <div class="kv"><span>TTFT（首 token）</span><span class="big" id="m-ttft">—</span></div>
       <div class="bar p"><i id="b-prefill"></i></div>
       <div class="kv"><span>Prefill 速度</span><span class="m-prefill" id="m-prefill">—</span></div>
@@ -159,11 +167,10 @@ let running = false;
 const runs = [];   // 每轮指标
 
 // ---------- 连接 ----------
-// ★ 默认地址自动推断：云 IDE（如华为云 online-*.huawei.com）会把端口
-//   代理到 https://<host>/proxy/<port>/ 下。此时浏览器里的 127.0.0.1
-//   是【浏览器自己的机器】，根本连不到容器里的 vLLM；而且 HTTPS 页面请求
-//   HTTP 会被按混合内容直接拦掉（表现为 "Failed to fetch"）。
-//   所以：页面若在 /proxy/<port>/ 下，就把同源的 /proxy/8000 作为默认值。
+// ★ 默认地址自动推断：云 IDE（如华为云 online-*.huawei.com）把端口代理到
+//   https://<host>/proxy/<port>/。此时浏览器里的 127.0.0.1 是【浏览器自己的
+//   机器】，连不到容器内的 vLLM；HTTPS 页面请求 HTTP 还会被按混合内容拦掉
+//   （都表现为 "Failed to fetch"）。所以这里按优先顺序探测候选地址。
 function guessBase() {
   const u = new URL(location.href);
   const m = u.pathname.match(/^(.*\/proxy\/)(\d+)(\/|$)/);
@@ -174,14 +181,54 @@ function guessBase() {
 }
 
 const VLLM_PORT = "8000";
-function applyGuess() {
-  const g = guessBase();
-  $("addr").value = g;
+function candidates() {
   const u = new URL(location.href);
-  if (u.pathname.includes("/proxy/")) {
-    note(`检测到云 IDE 代理访问，已把地址预填为同源代理 ${g}
-若你的 vLLM 不在 ${VLLM_PORT} 端口，请手动改成 /proxy/<实际端口>`);
+  const out = [];
+  // ① 页面所在目录 —— 用 scripts/serve_chat.sh（中继模式）时，页面与 /v1/*
+  //    同端口同前缀，这一条直接命中：不跨域、也不涉及 mixed content。
+  //    ★ 必须用 new URL(".", href) 而不是 origin —— 云 IDE 下页面在
+  //    /proxy/8080/ 而 origin 是根路径，用 origin 会丢掉 /proxy/8080 前缀。
+  const dir = new URL(".", location.href).href.replace(/\/+$/, "");
+  out.push(dir);
+  // ② 云 IDE 代理：把 /proxy/<本页端口>/ 换成 /proxy/8000/
+  const m = u.pathname.match(/^(.*\/proxy\/)(\d+)(\/|$)/);
+  if (m) out.push(`${u.origin}${m[1]}${VLLM_PORT}`);
+  // ③ 直连：http 环境下的 host:8000
+  if (u.protocol === "http:") out.push(`${u.protocol}//${u.hostname}:${VLLM_PORT}`);
+  return [...new Set(out)];
+}
+// 兼容入口：仍保留 guessBase（默认填第一个候选）
+function guessBase() { return candidates()[0]; }
+
+// 逐个候选试连，第一个通的就采用
+async function autoConnect() {
+  const list = candidates();
+  const tried = [];
+  for (const c of list) {
+    $("stat").textContent = `探测 ${c} …`; $("stat").className = "";
+    try {
+      const r = await fetch(c + "/v1/models", {cache:"no-store"});
+      if (!r.ok) { tried.push(`${c} → HTTP ${r.status}`); continue; }
+      const d = await r.json();
+      const ids = (d.data || []).map(x => x.id);
+      if (!ids.length) { tried.push(`${c} → 无模型`); continue; }
+      $("addr").value = c;
+      $("model").innerHTML = ids.map(i => `<option>${esc(i)}</option>`).join("");
+      $("stat").textContent = "已连接 · " + ids.length + " 个模型";
+      $("stat").className = "ok";
+      base_ = c;
+      return true;
+    } catch (e) { tried.push(`${c} → ${e.message}`); }
   }
+  $("addr").value = list[0];
+  $("stat").textContent = "未找到可用接口";
+  $("stat").className = "err";
+  note("已自动尝试以下地址，均失败：\n  " + tried.join("\n  ") + "\n\n"
+     + (list[0] === location.origin
+        ? "同源地址不通，通常说明本页是用普通静态服务器打开的（不是 chat_relay）。\n"
+          + "请改用: bash scripts/serve_chat.sh  （它同时托管页面与 /v1 反代）"
+        : "请确认 vLLM 已启动，或在上面手动填写正确地址后点「连接」。"));
+  return false;
 }
 function note(text) {
   const box = $("noteBox");
@@ -257,23 +304,46 @@ function addMsg(who, text){
 }
 
 // ---------- 单轮请求 ----------
-// 返回 {ttft, genMs, totalMs, promptTokens, completionTokens, text}
+// 返回 {ttft, genMs, totalMs, promptTokens, completionTokens, text,
+//       buffered, tFirst, tLast}
 async function ask(prompt, onDelta, onTick){
   const base = base_ || $("addr").value.replace(/\/+$/,"");
-  const body = {
-    model: $("model").value,
-    messages: history.concat([{role:"user", content:prompt}]),
-    max_tokens: parseInt($("maxtok").value,10) || 256,
-    temperature: parseFloat($("temp").value) || 0,
-    stream: true,
-    stream_options: {include_usage: true}   // ★ 让 vLLM 回传精确 token 数
+  const think = $("think").checked;
+  const mkBody = (withKw) => {
+    const b = {
+      model: $("model").value,
+      messages: history.concat([{role:"user", content:prompt}]),
+      max_tokens: parseInt($("maxtok").value,10) || 256,
+      temperature: parseFloat($("temp").value) || 0,
+      stream: true,
+      stream_options: {include_usage: true}   // ★ 让 vLLM 回传精确 token 数
+    };
+    // ★ 关闭思考模式：Qwen3 系列的 chat template 认这个开关，
+    //   打开时会先输出一大段思维链（既慢又占输出 token）
+    if(withKw && !think) b.chat_template_kwargs = {enable_thinking: false};
+    return b;
   };
+
   const t0 = performance.now();
-  const r = await fetch(base + "/v1/chat/completions", {
+  const send = (withKw) => fetch(base + "/v1/chat/completions", {
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body: JSON.stringify(body)
+    body: JSON.stringify(mkBody(withKw))
   });
+
+  let r = await send(true);
+  if(!r.ok && !$("think").checked){
+    // 该模型/模板不认 chat_template_kwargs 时不要整个失败，退回不带该字段重试
+    const txt = (await r.text()).slice(0,200);
+    if(r.status === 400 && /chat_template|enable_thinking|unknown|extra/i.test(txt)){
+      note("该模型似乎不支持 chat_template_kwargs.enable_thinking，"
+         + "已退回普通请求。若要关闭思维链，可改用 vLLM 启动参数 "
+         + "--default-chat-template-kwargs '{\"enable_thinking\": false}'。");
+      r = await send(false);
+    } else {
+      throw new Error("HTTP " + r.status + " " + txt);
+    }
+  }
   if(!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0,200));
 
   const reader = r.body.getReader(), dec = new TextDecoder();
@@ -321,8 +391,17 @@ async function ask(prompt, onDelta, onTick){
   // 优先用服务端 usage；缺失时退化为「chunk 数」近似
   const ptok = usage ? usage.prompt_tokens     : null;
   const ctok = usage ? usage.completion_tokens : chunks;
-  return { ttft, genMs, totalMs: tEnd - t0, promptTokens: ptok,
-           completionTokens: ctok, text, exact: !!usage };
+  const totalMs = tEnd - t0;
+
+  // ★ 缓冲检测：若前置代理（云 IDE 的 nginx 等）把 SSE 攒齐才发，
+  //   则所有 token 在同一瞬间到达 → 生成阶段极短、decode 大得离谱。
+  //   此时 TTFT 其实等于整个生成耗时，数字全是假的，必须明确告诉用户，
+  //   而不是显示一个看起来很正常/很惊人的值。
+  //   判据：输出 >= 10 个 token，但生成阶段占比 < 5%（正常应占 60%+）。
+  const buffered = ctok >= 10 && genMs < 0.05 * totalMs;
+
+  return { ttft, genMs, totalMs, promptTokens: ptok,
+           completionTokens: ctok, text, exact: !!usage, buffered };
 }
 
 // ---------- 会话历史（供多轮上下文） ----------
@@ -356,7 +435,8 @@ async function send(){
 
     // 先入 runs 再 paint：paint 用 runs 里的历史最佳做条形归一化，
     // 顺序反了会让本轮的最佳值不算进去（条形恒为满格）
-    runs.push({ttft:m.ttft, prefill, decode, ctok:m.completionTokens});
+    runs.push({ttft:m.ttft, prefill, decode, ctok:m.completionTokens,
+               buffered:m.buffered});
     paint({...m, prefill, decode});
     addHistory(m, prefill, decode);
     drawSpark();
@@ -382,6 +462,7 @@ function resetMetrics(){
   ["m-ttft","m-prefill","m-decode","m-ptok","m-ctok","m-total","m-gen"]
     .forEach(i => $(i).textContent = "—");
   $("b-prefill").style.width = "0"; $("b-decode").style.width = "0";
+  const w = $("m-warn"); w.style.display = "none"; w.textContent = "";
 }
 function paint(m){
   $("m-ttft").textContent   = secs(m.ttft);
@@ -391,8 +472,21 @@ function paint(m){
   $("m-ctok").textContent   = m.completionTokens;
   $("m-total").textContent  = secs(m.totalMs);
   $("m-gen").textContent    = secs(m.genMs);
-  // 条形以「当前历史最佳」为满格，便于横向比较
-  const best = runs.reduce((a,r)=>({
+
+  // ★ 缓冲告警：宁可不给数字，也不给错的数字
+  const w = $("m-warn");
+  if(m.buffered){
+    w.style.display = "block";
+    w.textContent = "⚠️ 检测到响应被缓冲（非流式到达）\n"
+      + `${m.completionTokens} 个 token 几乎同时在 ${secs(m.genMs)} 内到达，`
+      + "因此：\n· TTFT 实际是整个生成耗时\n· decode 速度是假值\n\n"
+      + "原因：前置反向代理（云 IDE 的 nginx）默认攒齐 SSE 才转发。\n"
+      + "解法：用 scripts/serve_chat.sh 启动（它带 X-Accel-Buffering: no，"
+      + "可让前置代理不缓冲）。";
+  } else { w.style.display = "none"; w.textContent = ""; }
+
+  // 条形以「当前历史最佳」为满格，便于横向比较（缓冲的轮次不参与）
+  const best = runs.filter(r=>!r.buffered).reduce((a,r)=>({
     p:Math.max(a.p, r.prefill||0), d:Math.max(a.d, r.decode||0)}), {p:1,d:1});
   $("b-prefill").style.width = Math.min(100, (m.prefill||0)/best.p*100) + "%";
   $("b-decode").style.width  = Math.min(100, (m.decode ||0)/best.d*100) + "%";
@@ -403,7 +497,8 @@ function addHistory(m, prefill, decode){
   const tbody = hist.querySelector("tbody");
   if(!tbody) return;
   const tr = document.createElement("tr");
-  tr.innerHTML = `<td>${n}</td>
+  if(m.buffered) tr.style.opacity = ".55";     // 缓冲的轮次数字不可信，弱化
+  tr.innerHTML = `<td>${n}${m.buffered?" ⚠️":""}</td>
     <td>${(m.ttft/1000).toFixed(3)}</td>
     <td class="pre">${prefill?prefill.toFixed(0):"—"}</td>
     <td class="dec">${decode?decode.toFixed(1):"—"}</td>
@@ -421,7 +516,9 @@ function drawSpark(){
   const W = c.clientWidth, H = 70;
   c.width = W*dpr; c.height = H*dpr;
   const g = c.getContext("2d"); g.scale(dpr,dpr); g.clearRect(0,0,W,H);
-  const vals = runs.map(r=>r.decode).filter(v=>v!=null && isFinite(v));
+  // 缓冲的轮次数字不可信，不画进趋势图
+  const vals = runs.filter(r=>!r.buffered).map(r=>r.decode)
+                   .filter(v=>v!=null && isFinite(v));
   if(vals.length < 1) return;
   const pad = {l:34, r:6, t:8, b:14};
   const max = Math.max(...vals) * 1.15, min = 0;
@@ -488,7 +585,7 @@ $("bench").onclick = async () => {
   }
 };
 
-applyGuess();
+autoConnect();
 connect();
 $("input").focus();
 </script>
