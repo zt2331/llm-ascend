@@ -128,20 +128,22 @@ def _import_msmodelslim():
     return None, None, None
 
 
-def build_calib(tok, calib_n, seq):
+def build_calib(tok, calib_n, seq, form="list"):
     """构造 msModelSlim 的 calib_data。
 
-    ★ 格式要求（实测踩坑，务必保持）：
-      msModelSlim 内部按 `model(*(calib_data[i]))` 调用校准数据，因此每个元素
-      必须是「能被解包成 forward 位置参数的容器」，且其中每一项要是 torch.Tensor。
+    ★ 格式要求（两轮实测踩坑记录，务必保持）：
+      1) msModelSlim 会校验 `calib_data[i]` 的类型，**只接受 list 或 dict**：
+           传 tuple → TypeError: calib_data[0] must be list or dict, not tuple.
+      2) 校验通过后按 `model(*(calib_data[i]))` 调用（其警告原文即如此），
+         所以容器里必须恰好是 forward 所需的位置参数，且要是 torch.Tensor。
 
-        传 [(ids_tensor,), ...]  →  model(*(ids_tensor,)) = model(ids_tensor)  ✓
-        传 [ids_list, ...]       →  model(*ids_list)，把 2048 个 token id
-                                   当成 2048 个位置参数展开                ✗
-          报错: TypeError: ....forward() takes from 1 to N positional arguments
-          msModelSlim 同时会警告: "Not all elements in calib_data are torch.Tensor"
-
-      所以这里每一条都包成 **单元素 tuple**。
+      三种写法对比：
+        form="list":  [ [ids_tensor], ... ]        → model(*[ids_tensor]) = model(ids_tensor)  ✓
+        form="dict":  [ {"input_ids": tensor}, ...] → model(**{...}) = model(input_ids=tensor) ✓
+        错误写法:      [ ids_list, ... ]            → model(*ids_list) 把 2048 个 token id
+                       当成 2048 个位置参数展开 → TypeError: forward() takes from 1 to N
+                       （同时警告 Not all elements in calib_data are torch.Tensor）
+        错误写法:      [ (ids_tensor,), ... ]       → TypeError: must be list or dict, not tuple.
     """
     import torch
     from utils.dataio import Dataset
@@ -152,7 +154,11 @@ def build_calib(tok, calib_n, seq):
     data = []
     for r in rows:
         ids = tok(r["text"], truncation=True, max_length=seq)["input_ids"]
-        data.append((torch.tensor(ids, dtype=torch.long),))
+        t = torch.tensor(ids, dtype=torch.long)
+        if form == "dict":
+            data.append({"input_ids": t})
+        else:                                   # 默认 list：与 msModelSlim 的
+            data.append([t])                    # model(*(calib_data[i])) 语义一致
     return data
 
 
@@ -196,8 +202,10 @@ def main():
 
     tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     model = load_model(model_path, prefer_device="auto", eval_mode=True)
-    calib = build_calib(tok, args.calib, args.seq)
-    print(f"[INFO] 校准样本 {len(calib)} 条，最大长度 {args.seq}")
+    # ★ 校准数据的两种合法形式（msModelSlim 只接受 list/dict，见 build_calib 注释）
+    calib_forms = [("list", build_calib(tok, args.calib, args.seq, "list")),
+                   ("dict", build_calib(tok, args.calib, args.seq, "dict"))]
+    print(f"[INFO] 校准样本 {len(calib_forms[0][1])} 条，最大长度 {args.seq}")
 
     # 不量化的层（lm_head / 视觉塔 / 混合线性注意力）
     # ★ msModelSlim 的 disable_names 只接受【具体 Linear 层】的名字，
@@ -266,7 +274,7 @@ def main():
             attempts.append(f"{tag}: {type(e).__name__} {str(e)[:200]}")
         return False
 
-    def make_api(disable, dev_type, do_smooth):
+    def make_api(disable, dev_type, do_smooth, calib_data):
         def api():
             kwargs = dict(w_bit=w_bit, a_bit=a_bit)
             if "dev_type" in _qc_params:
@@ -276,18 +284,21 @@ def main():
             if disable:
                 kwargs["disable_names"] = disable
             qc = QuantConfig(**kwargs)
-            cal = Calibrator(model, qc, calib_data=calib)
+            cal = Calibrator(model, qc, calib_data=calib_data)
             cal.run()
             cal.save(out_dir, save_type=["safe_tensor"])
         return api
 
     npu_dev = "npu" if dev.has_npu() else "cpu"
-    plan = [
-        (make_api(skip_linear_names, npu_dev, args.smooth),
-         f"dev_type={npu_dev}, do_smooth={args.smooth}"),
-        (make_api(skip_linear_names, "cpu", args.smooth),
-         f"dev_type=cpu, do_smooth={args.smooth}"),
-    ]
+    # 顺序：先 list 形式（与 msModelSlim 的 model(*(calib_data[i])) 语义一致），
+    #       失败再试 dict 形式；dev_type 先用 npu（模型已在 NPU 上，避免被搬回 CPU）
+    plan = []
+    for cform, cdata in calib_forms:
+        plan.append((make_api(skip_linear_names, npu_dev, args.smooth, cdata),
+                     f"calib={cform}, dev_type={npu_dev}, do_smooth={args.smooth}"))
+        if npu_dev != "cpu":
+            plan.append((make_api(skip_linear_names, "cpu", args.smooth, cdata),
+                         f"calib={cform}, dev_type=cpu, do_smooth={args.smooth}"))
 
     for fn, tag in plan:
         if _try(fn, tag):
